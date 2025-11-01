@@ -25,14 +25,17 @@ export function startPhysics(opts: {
   debugDomRef: React.MutableRefObject<HTMLElement | null>;
   setSpawned: (v: boolean) => void;
   setBlinkVisible: (v: boolean) => void;
-  setBuffer: React.Dispatch<React.SetStateAction<string>>;
+  // callback used when a letter box is hit by the local ball
+  onLetterHit?: (ch: string) => void;
   DESIGN_W: number;
   DESIGN_H: number;
   RECT_W: number;
   RECT_H: number;
-  BALL_RADIUS: number;
+  BALL_RADIUS_REF: React.MutableRefObject<number>;
   SPEED: number;
   RESPAWN_DELAY: number;
+  // other players' paddles (in design-space) — array of { x, w }
+  otherPaddlesRef?: React.MutableRefObject<Array<{ x: number; w: number }>>;
   startRespawnBlink: () => void;
 }) {
   const {
@@ -48,14 +51,14 @@ export function startPhysics(opts: {
     respawnTimerRef,
     ballDomRef,
     debugDomRef,
-    setSpawned,
-    setBlinkVisible,
-    setBuffer,
+  setSpawned,
+  setBlinkVisible,
+  onLetterHit,
     DESIGN_W,
     DESIGN_H,
     RECT_W,
     RECT_H,
-    BALL_RADIUS,
+    BALL_RADIUS_REF,
     SPEED,
     RESPAWN_DELAY,
     startRespawnBlink,
@@ -76,6 +79,7 @@ export function startPhysics(opts: {
 
     // integrate horizontal
     let nextX = ballXRef.current + vx * dt;
+    const BALL_RADIUS = BALL_RADIUS_REF.current;
     if (nextX - BALL_RADIUS <= 0) {
       velRef.current.x = Math.abs(vx);
       nextX = BALL_RADIUS;
@@ -86,7 +90,7 @@ export function startPhysics(opts: {
     ballXRef.current = nextX;
 
     const nextY = ballYRef.current + vy * dt;
-    const paddleTop = DESIGN_H - 96 - RECT_H;
+  const paddleTop = DESIGN_H - 96 - RECT_H;
     const bx = ballXRef.current;
 
     if (!respawningRef.current) {
@@ -100,7 +104,8 @@ export function startPhysics(opts: {
             ballYRef.current = r.y + r.h + BALL_RADIUS;
             // append letter
             try {
-              setBuffer((b) => b + (r.ch || String.fromCharCode(65 + r.idx)));
+              const letter = r.ch || String.fromCharCode(65 + r.idx);
+              if (onLetterHit) onLetterHit(letter);
             } catch (e) {
               // ignore
             }
@@ -128,7 +133,7 @@ export function startPhysics(opts: {
         setSpawned(false);
         setBlinkVisible(false);
         // schedule respawn
-        respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
+  respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
         if (respawnTimerRef.current != null) {
           clearTimeout(respawnTimerRef.current);
           respawnTimerRef.current = null;
@@ -140,14 +145,28 @@ export function startPhysics(opts: {
         handled = true;
       }
 
-      // paddle collision (downwards)
+      // paddle collision (downwards) — check local paddle and remote paddles
       if (!handled && vy > 0) {
+        // local paddle
         const paddleX = rectXRef.current;
-        const paddleRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
-        if (rectCircleCollides(paddleRect, bx, nextY, BALL_RADIUS)) {
+        const localRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
+        if (rectCircleCollides(localRect, bx, nextY, BALL_RADIUS)) {
           velRef.current.y = -Math.abs(vy);
           ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
           handled = true;
+        }
+
+        // remote paddles
+        if (!handled && opts.otherPaddlesRef && opts.otherPaddlesRef.current.length > 0) {
+          for (const p of opts.otherPaddlesRef.current) {
+            const r = { x: p.x, y: paddleTop, w: p.w || RECT_W, h: RECT_H };
+            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
+              velRef.current.y = -Math.abs(vy);
+              ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
+              handled = true;
+              break;
+            }
+          }
         }
       }
 
