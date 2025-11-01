@@ -3,6 +3,7 @@
 import { useEffect, useRef, useMemo, useState } from "react";
 import { defaultTheme } from "@talkjs/react-components";
 import { getTalkSession } from "@talkjs/core";
+import durhackTheme, { Avatar } from "../lib/talkTheme";
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -87,80 +88,12 @@ export default function Home() {
     };
   }, [appId]);
 
-  // Create a simple custom ChatHeader component that uses the default ConversationImage
-  function MyChatHeader(props: any) {
-    const { ConversationImage } = defaultTheme as any;
-    return (
-      <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-        {/* Use the default conversation image for avatar */}
-        <ConversationImage common={props.common} conversation={props.common.conversation} participants={props.common.participants} />
-        <div>
-          <div style={{ fontWeight: 700 }}>Custom Chat</div>
-          <div style={{ fontSize: 12, color: "#666" }}>Durhack demo theme</div>
-        </div>
-      </div>
-    );
-  }
-
-  // Avatar component: render an avatar visually similar to TalkJS's avatar.
-  function Avatar({ name, src, size = 48 }: { name: string; src?: string; size?: number }) {
-    const initials = name
-      .split(" ")
-      .map((s) => s[0])
-      .join("")
-      .slice(0, 2)
-      .toUpperCase();
-
-    const [imgFailed, setImgFailed] = useState(false);
-
-    try {
-      const { Avatar: TalkAvatar } = defaultTheme as any;
-      if (TalkAvatar && src && !imgFailed) {
-        return <TalkAvatar photoUrl={src} />;
-      }
-    } catch (e) {
-      // fall back
-    }
-
-    if (src && !imgFailed) {
-      return (
-        <img
-          src={src}
-          alt={name}
-          width={size}
-          height={size}
-          onError={() => setImgFailed(true)}
-          style={{ borderRadius: "9999px", objectFit: "cover", display: "block", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}
-        />
-      );
-    }
-
-    const bg = "linear-gradient(135deg,#60a5fa,#7c3aed)";
-    return (
-      <div
-        style={{
-          width: size,
-          height: size,
-          borderRadius: "9999px",
-          background: bg,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "white",
-          fontWeight: 700,
-          fontFamily: "monospace",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-        }}
-        aria-hidden
-      >
-        {initials}
-      </div>
-    );
-  }
   const myUserName = "Frank";
 
-  // Memoize theme to avoid re-renders
-  const theme = useMemo(() => ({ ChatHeader: MyChatHeader }), []);
+  // Memoize theme to avoid unnecessary re-allocations. We export a theme
+  // object from `lib/talkTheme.tsx` — pass that into TalkJS components when
+  // rendering a Chatbox. Keeping it memoized avoids React churn.
+  const theme = useMemo(() => durhackTheme, []);
 
   // Design viewport for consistent multiplayer view: fixed design pixels (16:9)
   const DESIGN_W = 1280;
