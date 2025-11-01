@@ -8,7 +8,6 @@ export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
   // If left blank the chat will not initialize until you set it.
   const appId = process.env.NEXT_PUBLIC_TALKJS_APP_ID || "";
-
   // demo user ids — change these for your app's user ids
   const userId = "frank";
   const otherUserId = "nina";
@@ -33,16 +32,16 @@ export default function Home() {
 
     const session = sessionRef.current;
 
-  // create demo users and a conversation if they don't exist
-  // include a photoUrl if provided for a better avatar experience
-  session.currentUser.createIfNotExists({ name: "Frank", photoUrl: initialPhoto || undefined });
+    // create demo users and a conversation if they don't exist
+    // include a photoUrl if provided for a better avatar experience
+    session.currentUser.createIfNotExists({ name: "Frank", photoUrl: initialPhoto || undefined });
     session.user(otherUserId).createIfNotExists({ name: "Nina" });
 
-  const conversation = session.conversation(conversationId);
-  conversation.createIfNotExists();
-  conversation.participant(otherUserId).createIfNotExists();
-  // keep a reference to the conversation so UI components can send messages
-  conversationRef.current = conversation;
+    const conversation = session.conversation(conversationId);
+    conversation.createIfNotExists();
+    conversation.participant(otherUserId).createIfNotExists();
+    // keep a reference to the conversation so UI components can send messages
+    conversationRef.current = conversation;
 
     return () => {
       // tidy up TalkJS session when component unmounts
@@ -104,12 +103,6 @@ export default function Home() {
   }
 
   // Avatar component: render an avatar visually similar to TalkJS's avatar.
-  // Note: TalkJS's `ConversationImage` component relies on internal TalkJS
-  // context and props; calling it directly outside of the TalkJS render
-  // tree can throw runtime errors (observed as "i is undefined"). To avoid
-  // runtime failures we render a compatible avatar here (photo or initials)
-  // which can be styled to match TalkJS. If you want the exact TalkJS
-  // component, it must be mounted inside the TalkJS component tree.
   function Avatar({ name, src, size = 48 }: { name: string; src?: string; size?: number }) {
     const initials = name
       .split(" ")
@@ -118,22 +111,15 @@ export default function Home() {
       .slice(0, 2)
       .toUpperCase();
 
-    // track image load failure so we can fall back to initials when the
-    // provided photo URL 404s or otherwise fails to load
     const [imgFailed, setImgFailed] = useState(false);
 
-    // Prefer to use TalkJS's Avatar theme component if available — it
-    // reproduces the same visuals the TalkJS UI uses (background-image etc.)
     try {
       const { Avatar: TalkAvatar } = defaultTheme as any;
-      // Only render the TalkJS Avatar when we have a real photo URL to avoid
-      // the theme rendering `url(undefined)` which causes GET /undefined requests.
       if (TalkAvatar && src && !imgFailed) {
-        // TalkAvatar expects prop `photoUrl` per the library implementation
         return <TalkAvatar photoUrl={src} />;
       }
     } catch (e) {
-      // fall back to local rendering
+      // fall back
     }
 
     if (src && !imgFailed) {
@@ -179,9 +165,6 @@ export default function Home() {
   // Design viewport for consistent multiplayer view: fixed design pixels (16:9)
   const DESIGN_W = 1280;
   const DESIGN_H = 720;
-  // Time it should take the paddle to travel end-to-end (design-space seconds)
-  // Using a time-based constant ensures the travel time is identical across
-  // viewport sizes because the design surface is uniformly scaled.
   const TRAVEL_TIME = 2.0; // seconds to cross from left bound to right bound
   const [scale, setScale] = useState(1);
 
@@ -189,17 +172,13 @@ export default function Home() {
     function updateScale() {
       const sw = window.innerWidth;
       const sh = window.innerHeight;
-      // leave a little margin so the container isn't flush to the viewport
       const s = Math.min((sw * 0.96) / DESIGN_W, (sh * 0.92) / DESIGN_H);
-      // don't upscale above 1 (keep design at native scale)
       setScale(Math.min(1, s));
     }
     updateScale();
     window.addEventListener("resize", updateScale);
     return () => window.removeEventListener("resize", updateScale);
   }, []);
-
-  // A small letter-button composer placed above the chatbox. It renders each
   // alphabet letter as a separate coloured box (with space between) and leaves
   // the typed buffer in a fixed bottom bar like a normal chat input area.
   // accept external btnRefs so parent can compute collisions in design-space
@@ -454,9 +433,14 @@ export default function Home() {
   // constant-speed behaviour: the ball travels at a fixed speed vector
   const SPEED = 700; // px/s magnitude in design-space
 
+  // respawn delay in seconds (adjustable)
+  const RESPAWN_DELAY = 3.0; // default respawn time in seconds
+  // vertical spawn position in design-space pixels (increase to spawn lower)
+  const RESPAWN_Y_PX = 300; // design-space px
+
   // Use refs for ball position to avoid React re-renders each frame.
   const ballXRef = useRef<number>(DESIGN_W / 2);
-  const ballYRef = useRef<number>(64);
+  const ballYRef = useRef<number>(RESPAWN_Y_PX);
   const ballDomRef = useRef<HTMLDivElement | null>(null);
   // debug overlay DOM ref (updated from RAF) so we can display realtime values
   const debugDomRef = useRef<HTMLDivElement | null>(null);
@@ -488,10 +472,6 @@ export default function Home() {
   // fallback so respawn happens even if RAF is throttled/stalled.
   const respawnDeadlineRef = useRef<number | null>(null);
   const respawnTimerRef = useRef<number | null>(null);
-  // respawn delay in seconds (adjustable)
-  const RESPAWN_DELAY = 3.0; // default respawn time in seconds
-  // vertical spawn position in design-space pixels (increase to spawn lower)
-  const RESPAWN_Y_PX = 300; // design-space px
 
   // helper to start the blink + resume sequence (shared between RAF and timeout)
   function startRespawnBlink() {
@@ -586,201 +566,37 @@ export default function Home() {
   }
 
   useEffect(() => {
-    let mounted = true;
-    console.log("[game] physics effect mounted: starting game loop");
-    function step(ts: number) {
-      if (!mounted) return;
-      if (lastPhysics.current == null) lastPhysics.current = ts;
-      const dt = (ts - (lastPhysics.current || ts)) / 1000;
-      lastPhysics.current = ts;
-
-      // integrate constant velocity
-      const vx = velRef.current.x;
-      const vy = velRef.current.y;
-      // integrate into refs
-      let nextX = ballXRef.current + vx * dt;
-      if (nextX - BALL_RADIUS <= 0) {
-        velRef.current.x = Math.abs(vx);
-        nextX = BALL_RADIUS;
-      } else if (nextX + BALL_RADIUS >= DESIGN_W) {
-        velRef.current.x = -Math.abs(vx);
-        nextX = DESIGN_W - BALL_RADIUS;
-      }
-      ballXRef.current = nextX;
-
-      const nextY = ballYRef.current + vy * dt;
-      // compute paddle top y in design-space (same layout as BufferBar position)
-      const paddleTop = DESIGN_H - 96 - RECT_H;
-
-      // collision with paddle or top-row letters
-      const bx = ballXRef.current;
-      if (respawningRef.current) {
-        // while respawning, keep the ball at its set position and don't integrate
-      } else {
-        // 1) if moving up, check collisions against the letter buttons at the top
-        let handled = false;
-        if (vy < 0 && letterRectsRef.current.length > 0) {
-          for (const r of letterRectsRef.current) {
-            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
-              // bounce downwards and place ball just below the button
-              velRef.current.y = Math.abs(vy);
-              ballYRef.current = r.y + r.h + BALL_RADIUS;
-              // append the letter to the shared buffer (replace click behavior)
-              try {
-                setBuffer((b) => b + (r.ch || String.fromCharCode(65 + r.idx)));
-              } catch (e) {
-                // setBuffer may not be available in some test contexts; ignore
-              }
-              handled = true;
-              break;
-            }
-          }
-        }
-
-        // 2) top boundary bounce (only if not handled by letter collision)
-        if (!handled && nextY - BALL_RADIUS <= 0) {
-          velRef.current.y = Math.abs(vy);
-          ballYRef.current = BALL_RADIUS;
-          handled = true;
-        }
-
-        // 3) ball has fallen entirely off the bottom -> despawn then respawn after a delay
-        if (!handled && nextY - BALL_RADIUS > DESIGN_H) {
-        // ball has fallen entirely off the bottom -> despawn then respawn after a delay
-        respawningRef.current = true;
-        // stop motion
-        velRef.current = { x: 0, y: 0 };
-        // clear any existing blink timer
-        if (blinkTimerRef.current != null) {
-          clearInterval(blinkTimerRef.current);
-          blinkTimerRef.current = null;
-        }
-        // hide the old ball immediately
-        setSpawned(false);
-        setBlinkVisible(false);
-        console.log("[game] ball fell off bottom", { ts, nextY: nextY, ballX: ballXRef.current });
-        // schedule respawn by setting a deadline (RAF timestamp in ms)
-        respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
-        console.log("[game] respawn scheduled", { deadline: respawnDeadlineRef.current, delay: RESPAWN_DELAY });
-        // also set a real timeout fallback so respawn occurs even if RAF is paused
-        if (respawnTimerRef.current != null) {
-          clearTimeout(respawnTimerRef.current);
-          respawnTimerRef.current = null;
-        }
-        respawnTimerRef.current = window.setTimeout(() => {
-          respawnTimerRef.current = null;
-          console.log("[game] respawn timeout fired (fallback)");
-          // use the shared helper to start blink+resume
-          startRespawnBlink();
-        }, RESPAWN_DELAY * 1000);
-        }
-
-        // 4) paddle collision (only when moving downward). We check this after
-        // the fully-off test so a ball that has moved off-screen doesn't get
-        // incorrectly captured by a late paddle check.
-        if (!handled && vy > 0) {
-          const paddleX = rectXRef.current;
-          const paddleRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
-          if (rectCircleCollides(paddleRect, bx, nextY, BALL_RADIUS)) {
-            // position ball on top of paddle and invert vertical component
-            velRef.current.y = -Math.abs(vy);
-            ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
-            handled = true;
-          }
-        }
-
-        // 5) ball is crossing the bottom edge; allow it to continue moving off-screen
-        if (!handled && nextY + BALL_RADIUS >= DESIGN_H) {
-          ballYRef.current = nextY;
-          // Log the crossing event only once when the ball first moves past the bottom
-          if (!bottomCrossedRef.current) {
-            bottomCrossedRef.current = true;
-            console.log("[game] crossed bottom boundary (entered off-screen)", { ts, nextY, ballY: ballYRef.current, vy, respawning: respawningRef.current });
-          }
-        }
-
-        // 6) fallback: no special case handled -> apply integrated position
-        if (!handled && !(nextY + BALL_RADIUS >= DESIGN_H)) {
-          ballYRef.current = nextY;
-        }
-      }
-
-      // If a respawn deadline was set and we've reached it, perform the respawn
-      if (respawnDeadlineRef.current != null && ts >= respawnDeadlineRef.current) {
-        respawnDeadlineRef.current = null;
-      // reset bottom-crossed marker and center spawn position (horizontal center,
-      // vertical position controlled by RESPAWN_Y_PX if provided else fraction)
-  bottomCrossedRef.current = false;
-  ballXRef.current = DESIGN_W / 2;
-  ballYRef.current = RESPAWN_Y_PX;
-        if (ballDomRef.current) {
-          const sx = Math.round(ballXRef.current - BALL_RADIUS);
-          const sy = Math.round(ballYRef.current - BALL_RADIUS);
-          ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
-        }
-        // show and blink
-        setSpawned(true);
-        setBlinkVisible(true);
-        let flashes = 6;
-        let visible = true;
-        if (blinkTimerRef.current != null) {
-          clearInterval(blinkTimerRef.current);
-          blinkTimerRef.current = null;
-        }
-        blinkTimerRef.current = window.setInterval(() => {
-          visible = !visible;
-          setBlinkVisible(visible);
-          flashes -= 1;
-          if (flashes <= 0) {
-            if (blinkTimerRef.current != null) {
-              clearInterval(blinkTimerRef.current);
-              blinkTimerRef.current = null;
-            }
-            setBlinkVisible(true);
-            respawningRef.current = false;
-            velRef.current = { x: 0, y: SPEED };
-          }
-        }, 180);
-      }
-
-      // update DOM position directly for smooth animation
-      if (ballDomRef.current && !respawningRef.current) {
-        const sx = Math.round(ballXRef.current - BALL_RADIUS);
-        const sy = Math.round(ballYRef.current - BALL_RADIUS);
-        // ensure left/top are zeroed so translate3d positions correctly
-        ballDomRef.current.style.left = "0";
-        ballDomRef.current.style.top = "0";
-        ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
-      }
-
-      // Update a tiny debug overlay (text) so we can inspect values visually
-      if (debugDomRef.current) {
-        try {
-          debugDomRef.current.textContent = `y=${Math.round(ballYRef.current)} nextY=${Math.round(nextY)} vy=${Math.round(vy)} respawning=${respawningRef.current}`;
-        } catch (e) {
-          // ignore DOM write errors
-        }
-      }
-      physicsRaf.current = requestAnimationFrame(step);
-    }
-
-    physicsRaf.current = requestAnimationFrame(step);
-    return () => {
-      mounted = false;
-      if (physicsRaf.current != null) cancelAnimationFrame(physicsRaf.current);
-      physicsRaf.current = null;
-      lastPhysics.current = null;
-      // clear any pending blink timers when unmounting
-      if (blinkTimerRef.current != null) {
-        clearInterval(blinkTimerRef.current);
-        blinkTimerRef.current = null;
-      }
-      // clear any pending respawn deadline
-      respawnDeadlineRef.current = null;
-    };
-    // physics loop should run continuously; it reads `rectXRef.current`
-    // directly so we don't need to depend on `rectX` and restart the
-    // effect on every small paddle movement (which would interrupt RAF).
+    // start the physics loop implemented in a shared module
+    // this keeps the heavy per-frame logic out of the component file
+    // and returns a cleanup function to stop the loop on unmount.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { startPhysics } = require("../lib/physics");
+    const stop = startPhysics({
+      ballXRef,
+      ballYRef,
+      velRef,
+      rectXRef,
+      letterRectsRef,
+      respawningRef,
+      blinkTimerRef,
+      bottomCrossedRef,
+      respawnDeadlineRef,
+      respawnTimerRef,
+      ballDomRef,
+      debugDomRef,
+      setSpawned,
+      setBlinkVisible,
+      setBuffer,
+      DESIGN_W,
+      DESIGN_H,
+      RECT_W,
+      RECT_H,
+      BALL_RADIUS,
+      SPEED,
+      RESPAWN_DELAY,
+      startRespawnBlink,
+    });
+    return () => stop();
   }, []);
 
   return (
