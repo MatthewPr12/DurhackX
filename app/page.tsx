@@ -3,7 +3,7 @@
 import { useEffect, useRef, useMemo, useState } from "react";
 import { defaultTheme } from "@talkjs/react-components";
 import { getTalkSession } from "@talkjs/core";
-import durhackTheme, { Avatar } from "../lib/talkTheme";
+import durhackTheme, { Avatar } from "../engine/talkTheme";
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -502,8 +502,8 @@ export default function Home() {
     // start the physics loop implemented in a shared module
     // this keeps the heavy per-frame logic out of the component file
     // and returns a cleanup function to stop the loop on unmount.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { startPhysics } = require("../lib/physics");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { startPhysics } = require("../engine/physics");
     const stop = startPhysics({
       ballXRef,
       ballYRef,
