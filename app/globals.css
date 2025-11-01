@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #000000;
+  --foreground: #ffffff;
 }
 
 @theme inline {
@@ -14,13 +14,40 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* keep dark-mode consistent with explicit black background */
+    --background: #000000;
+    --foreground: #ffffff;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Prefer the loaded DM Mono font (Google-hosted) then the next/font variable, finally monospace fallbacks */
+  font-family: 'DM Mono', var(--font-dm-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono", monospace;
+}
+
+/* Ensure TalkJS chatbox inherits the site font (overrides TalkJS defaults) */
+.t-chatbox, .t-chatbox * {
+  font-family: 'DM Mono', var(--font-dm-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Segoe UI Mono", monospace !important;
+}
+
+/* Hide the default TalkJS rich-text editor so we can replace it with a custom
+   letter-button composer. We target the ProseMirror editor and any contenteditable
+   field inside the TalkJS chatbox. */
+.t-editor .ProseMirror,
+.t-chatbox [contenteditable="true"] {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Prevent vertical scrolling so the game viewport always fits the browser window */
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Hide the default TalkJS chatbox (white box) while keeping its JS API available. */
+.t-chatbox {
+  display: none !important;
 }
