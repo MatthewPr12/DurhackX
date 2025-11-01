@@ -202,33 +202,36 @@ export default function Home() {
   // A small letter-button composer placed above the chatbox. It renders each
   // alphabet letter as a separate coloured box (with space between) and leaves
   // the typed buffer in a fixed bottom bar like a normal chat input area.
-  function LetterComposer({ onAppend }: { onAppend?: (ch: string) => void }) {
+  // accept external btnRefs so parent can compute collisions in design-space
+  function LetterComposer({ onAppend, btnRefs }: { onAppend?: (ch: string) => void; btnRefs?: React.MutableRefObject<Array<HTMLButtonElement | null>> }) {
     const letters = Array.from(Array(26)).map((_, i) => String.fromCharCode(65 + i));
-    const btnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+    // use provided refs if available otherwise fall back to internal
+    const localBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+    const btnRefsInternal = btnRefs || localBtnRefs;
 
     function pushLetter(l: string) {
       if (onAppend) onAppend(l);
     }
 
-    function renderButton(l: string, i: number) {
+  function renderButton(l: string, i: number, btnRefsRef: React.MutableRefObject<Array<HTMLButtonElement | null>>) {
       // map index -> hue across 0..320 degrees (rainbow) for smooth color map
       const hue = Math.round((i / 25) * 320); // 0..320
       const bg = `hsl(${hue} 85% 50%)`;
       return (
         <button
           key={l}
-          ref={(el) => { btnRefs.current[i] = el }}
+  ref={(el) => { btnRefsRef.current[i] = el }}
           onClick={() => pushLetter(l)}
           aria-label={`Insert ${l}`}
-          onKeyDown={(e) => {
+            onKeyDown={(e) => {
             // allow arrow navigation and Enter on focused button
             if (e.key === "ArrowLeft") {
               const next = Math.max(0, i - 1);
-              btnRefs.current[next]?.focus();
+              btnRefsRef.current[next]?.focus();
               e.preventDefault();
             } else if (e.key === "ArrowRight") {
               const next = Math.min(25, i + 1);
-              btnRefs.current[next]?.focus();
+              btnRefsRef.current[next]?.focus();
               e.preventDefault();
             } else if (e.key === "Enter") {
               pushLetter(l);
@@ -267,7 +270,7 @@ export default function Home() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(26, minmax(0, 1fr))", gap: 8, paddingBottom: 4 }}>
             {letters.map((l, i) => (
               // render each button to occupy one grid column so all 26 fit a single row
-              <div key={l} style={{ width: "100%" }}>{renderButton(l, i)}</div>
+              <div key={l} style={{ width: "100%" }}>{renderButton(l, i, btnRefsInternal)}</div>
             ))}
           </div>
         </div>
@@ -458,6 +461,15 @@ export default function Home() {
   // debug overlay DOM ref (updated from RAF) so we can display realtime values
   const debugDomRef = useRef<HTMLDivElement | null>(null);
 
+  // design inner container ref (the scaled design surface) so we can compute
+  // element positions in design-space by converting client rects -> design coords
+  const designInnerRef = useRef<HTMLDivElement | null>(null);
+  // parent-held refs for letter button DOM nodes (populated by LetterComposer)
+  const composerBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // precomputed letter button rects in design-space (x,y,width,height)
+  // includes index and character so collisions can append the correct letter
+  const letterRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; idx: number; ch: string }>>([]);
+
   // velocity ref (vx, vy) in design-space px/s. Start moving downward.
   const velRef = useRef({ x: 0, y: SPEED });
   const physicsRaf = useRef<number | null>(null);
@@ -527,6 +539,52 @@ export default function Home() {
       console.log("[game] startRespawnBlink called", { time: Date.now() });
   }
 
+  // compute letter button rects in design-space (reads actual DOM positions)
+  function computeLetterRects() {
+    const inner = designInnerRef.current;
+    if (!inner) return;
+    const innerRect = inner.getBoundingClientRect();
+    const scaleCur = scale || 1;
+    const rects: Array<{ x: number; y: number; w: number; h: number; idx: number; ch: string }> = [];
+    for (let i = 0; i < composerBtnRefs.current.length; i++) {
+      const el = composerBtnRefs.current[i];
+      if (!el) continue;
+      const b = el.getBoundingClientRect();
+      // convert from client pixels -> design-space by subtracting the inner
+      // container origin and dividing by current scale.
+      const x = (b.left - innerRect.left) / scaleCur;
+      const y = (b.top - innerRect.top) / scaleCur;
+      const w = b.width / scaleCur;
+      const h = b.height / scaleCur;
+      // determine the letter character from index (A..Z)
+      const ch = String.fromCharCode(65 + i);
+      rects.push({ x, y, w, h, idx: i, ch });
+    }
+    letterRectsRef.current = rects;
+  }
+
+  // recalc letter rects when scale changes or window resizes
+  useEffect(() => {
+    computeLetterRects();
+    // buttons may not be measured on the first frame; recompute shortly after
+    const t = window.setTimeout(() => computeLetterRects(), 120);
+    const onResize = () => computeLetterRects();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      clearTimeout(t);
+    };
+  }, [scale]);
+
+  // collision helper: rectangle vs circle (design-space coords)
+  function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number) {
+    const closestX = Math.max(r.x, Math.min(cx, r.x + r.w));
+    const closestY = Math.max(r.y, Math.min(cy, r.y + r.h));
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    return dx * dx + dy * dy <= radius * radius;
+  }
+
   useEffect(() => {
     let mounted = true;
     console.log("[game] physics effect mounted: starting game loop");
@@ -554,24 +612,40 @@ export default function Home() {
       // compute paddle top y in design-space (same layout as BufferBar position)
       const paddleTop = DESIGN_H - 96 - RECT_H;
 
-      // collision with paddle: if moving downward and crossing paddle top
+      // collision with paddle or top-row letters
       const bx = ballXRef.current;
       if (respawningRef.current) {
         // while respawning, keep the ball at its set position and don't integrate
-      } else if (vy > 0 && nextY + BALL_RADIUS >= paddleTop && nextY - BALL_RADIUS <= DESIGN_H) {
-        const paddleX = rectXRef.current;
-        if (bx >= paddleX - BALL_RADIUS && bx <= paddleX + RECT_W + BALL_RADIUS) {
-          // position ball on top of paddle and invert vertical component
-          velRef.current.y = -Math.abs(vy);
-          ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
-        } else {
-          // ball is crossing the paddle top but not over the paddle — it will pass through
-          ballYRef.current = nextY;
+      } else {
+        // 1) if moving up, check collisions against the letter buttons at the top
+        let handled = false;
+        if (vy < 0 && letterRectsRef.current.length > 0) {
+          for (const r of letterRectsRef.current) {
+            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
+              // bounce downwards and place ball just below the button
+              velRef.current.y = Math.abs(vy);
+              ballYRef.current = r.y + r.h + BALL_RADIUS;
+              // append the letter to the shared buffer (replace click behavior)
+              try {
+                setBuffer((b) => b + (r.ch || String.fromCharCode(65 + r.idx)));
+              } catch (e) {
+                // setBuffer may not be available in some test contexts; ignore
+              }
+              handled = true;
+              break;
+            }
+          }
         }
-      } else if (nextY - BALL_RADIUS <= 0) {
-        velRef.current.y = Math.abs(vy);
-        ballYRef.current = BALL_RADIUS;
-      } else if (nextY - BALL_RADIUS > DESIGN_H) {
+
+        // 2) top boundary bounce (only if not handled by letter collision)
+        if (!handled && nextY - BALL_RADIUS <= 0) {
+          velRef.current.y = Math.abs(vy);
+          ballYRef.current = BALL_RADIUS;
+          handled = true;
+        }
+
+        // 3) ball has fallen entirely off the bottom -> despawn then respawn after a delay
+        if (!handled && nextY - BALL_RADIUS > DESIGN_H) {
         // ball has fallen entirely off the bottom -> despawn then respawn after a delay
         respawningRef.current = true;
         // stop motion
@@ -599,16 +673,36 @@ export default function Home() {
           // use the shared helper to start blink+resume
           startRespawnBlink();
         }, RESPAWN_DELAY * 1000);
-      } else if (nextY + BALL_RADIUS >= DESIGN_H) {
-        // ball is crossing the bottom edge; allow it to continue moving off-screen
-        ballYRef.current = nextY;
-        // Log the crossing event only once when the ball first moves past the bottom
-        if (!bottomCrossedRef.current) {
-          bottomCrossedRef.current = true;
-          console.log("[game] crossed bottom boundary (entered off-screen)", { ts, nextY, ballY: ballYRef.current, vy, respawning: respawningRef.current });
         }
-      } else {
-        ballYRef.current = nextY;
+
+        // 4) paddle collision (only when moving downward). We check this after
+        // the fully-off test so a ball that has moved off-screen doesn't get
+        // incorrectly captured by a late paddle check.
+        if (!handled && vy > 0) {
+          const paddleX = rectXRef.current;
+          const paddleRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
+          if (rectCircleCollides(paddleRect, bx, nextY, BALL_RADIUS)) {
+            // position ball on top of paddle and invert vertical component
+            velRef.current.y = -Math.abs(vy);
+            ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
+            handled = true;
+          }
+        }
+
+        // 5) ball is crossing the bottom edge; allow it to continue moving off-screen
+        if (!handled && nextY + BALL_RADIUS >= DESIGN_H) {
+          ballYRef.current = nextY;
+          // Log the crossing event only once when the ball first moves past the bottom
+          if (!bottomCrossedRef.current) {
+            bottomCrossedRef.current = true;
+            console.log("[game] crossed bottom boundary (entered off-screen)", { ts, nextY, ballY: ballYRef.current, vy, respawning: respawningRef.current });
+          }
+        }
+
+        // 6) fallback: no special case handled -> apply integrated position
+        if (!handled && !(nextY + BALL_RADIUS >= DESIGN_H)) {
+          ballYRef.current = nextY;
+        }
       }
 
       // If a respawn deadline was set and we've reached it, perform the respawn
@@ -700,10 +794,10 @@ export default function Home() {
           <div className="mt-6" style={{ display: "flex", justifyContent: "center", width: "100%" }}>
             {/* fixed design window scaled via CSS transform so all clients see the same layout */}
             <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "hidden", position: "relative" }}>
-              <div style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
+              <div ref={designInnerRef} style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
               {/* composer at the top */}
               <div style={{ flex: "0 0 auto" }}>
-                <LetterComposer onAppend={handleAppend} />
+                <LetterComposer onAppend={handleAppend} btnRefs={composerBtnRefs} />
               </div>
 
               {/* render user avatar as a physics 'ball' (positioned absolutely in design-space) */}
