@@ -5,10 +5,12 @@ import jwt, requests
 
 TALKJS_APP_ID = os.getenv("TALKJS_APP_ID", "")
 TALKJS_SECRET = os.getenv("TALKJS_SECRET", "")
-TALKJS_BASE = "https://api-durhack.talkjs.com"
+
+# Prefer the DurHack host if provided, else default to public api
+TALKJS_API_ORIGIN = os.getenv("TALKJS_API_ORIGIN", "https://api-durhack.talkjs.com")  # or "https://api.talkjs.com"
 _DEFAULT_TIMEOUT = 8
 
-def _make_app_token(expires_in_seconds: int = 900) -> str:
+def _make_app_token(expires_in_seconds: int = 300) -> str:
     if not TALKJS_APP_ID or not TALKJS_SECRET:
         raise RuntimeError("TALKJS_APP_ID/TALKJS_SECRET not set")
     now = int(time.time())
@@ -32,37 +34,51 @@ def _auth_headers() -> Dict[str, str]:
         "X-TalkJS-Version": api_version,
     }
 
+def _url(path: str) -> str:
+    # path should start WITHOUT /v1; we add it here
+    return f"{TALKJS_API_ORIGIN}/v1/{TALKJS_APP_ID}{path}"
+
 def ensure_user(user_id: str, profile: Dict[str, Any]) -> None:
-    url = f"{TALKJS_BASE}/v1/{TALKJS_APP_ID}/users/{user_id}"
-    r = requests.put(url, json=profile, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
+    r = requests.put(_url(f"/users/{user_id}"), json=profile, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
     r.raise_for_status()
 
-def ensure_conversation(conversation_id: str, participants: Iterable[str], subject: Optional[str] = None,
-                        welcome_message: Optional[str] = None, custom: Optional[Dict[str, Any]] = None) -> None:
+def ensure_conversation(conversation_id: str, participants: Iterable[str],
+                        subject: Optional[str] = None,
+                        welcome_message: Optional[str] = None,
+                        custom: Optional[Dict[str, Any]] = None) -> None:
     payload: Dict[str, Any] = {"participants": list(participants)}
     if subject is not None: payload["subject"] = subject
     if welcome_message is not None: payload["welcomeMessages"] = [welcome_message]
     if custom is not None: payload["custom"] = custom
-    url = f"{TALKJS_BASE}/{TALKJS_APP_ID}/conversations/{conversation_id}"
-    r = requests.put(url, json=payload, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
+    r = requests.put(_url(f"/conversations/{conversation_id}"), json=payload, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
     r.raise_for_status()
 
 def add_participants(conversation_id: str, participants: Iterable[str]) -> None:
-    url = f"{TALKJS_BASE}/{TALKJS_APP_ID}/conversations/{conversation_id}"
-    payload = {"participants": {"add": list(participants)}}
-    r = requests.patch(url, json=payload, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
-    r.raise_for_status()
+    for uid in participants:
+        url = _url(f"/conversations/{conversation_id}/participants/{uid}")
+        r = requests.put(url, json={}, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
+        r.raise_for_status()
 
 def post_messages(conversation_id: str, messages: List[Dict[str, Any]]) -> None:
     if not isinstance(messages, list) or not messages:
         raise ValueError("messages must be a non-empty list")
-    url = f"{TALKJS_BASE}/{TALKJS_APP_ID}/conversations/{conversation_id}/messages"
-    r = requests.post(url, json=messages, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
+    r = requests.post(_url(f"/conversations/{conversation_id}/messages"), json=messages, headers=_auth_headers(), timeout=_DEFAULT_TIMEOUT)
     r.raise_for_status()
 
 def post_text(conversation_id: str, text: str, *, sender_id: Optional[str] = None) -> None:
-    msg = {"type": "UserMessage", "sender": sender_id, "text": text} if sender_id else {"type": "SystemMessage", "text": text}
+    if sender_id:
+        msg = {
+            "type": "UserMessage",
+            "sender": sender_id,
+            "text": text,
+        }
+    else:
+        msg = {
+            "type": "SystemMessage",
+            "text": text,
+        }
     post_messages(conversation_id, [msg])
+
 
 def verify_webhook_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
     if not (signature and timestamp) or not TALKJS_SECRET:
