@@ -14,6 +14,10 @@ export default function Home() {
   const otherUserId = "nina";
   const conversationId = "new_conversation";
 
+  // Demo user display name and optional photo URL (can be provided via env for testing)
+  const initialPhoto = process.env.NEXT_PUBLIC_USER_PHOTO || "";
+  const [myPhoto, setMyPhoto] = useState<string | undefined>(initialPhoto || undefined);
+
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
 
@@ -29,8 +33,9 @@ export default function Home() {
 
     const session = sessionRef.current;
 
-    // create demo users and a conversation if they don't exist
-    session.currentUser.createIfNotExists({ name: "Frank" });
+  // create demo users and a conversation if they don't exist
+  // include a photoUrl if provided for a better avatar experience
+  session.currentUser.createIfNotExists({ name: "Frank", photoUrl: initialPhoto || undefined });
     session.user(otherUserId).createIfNotExists({ name: "Nina" });
 
   const conversation = session.conversation(conversationId);
@@ -50,6 +55,39 @@ export default function Home() {
     };
   }, [appId]);
 
+  // Try to read the current user's photo from the TalkJS session where possible.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    async function probe() {
+      const s: any = sessionRef.current;
+      if (!s) return;
+      try {
+        const cur = s.currentUser;
+        if (!cur) return;
+        // Common quick-paths
+        if (cur.photoUrl) {
+          setMyPhoto(cur.photoUrl);
+          return;
+        }
+        // Some SDK shapes expose a `get()` promise to read user fields
+        if (typeof cur.get === "function") {
+          const u = await cur.get();
+          if (u && !cancelled && (u.photoUrl || u.photo || u.avatarUrl)) {
+            setMyPhoto(u.photoUrl || u.photo || u.avatarUrl);
+            return;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    probe();
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
+
   // Create a simple custom ChatHeader component that uses the default ConversationImage
   function MyChatHeader(props: any) {
     const { ConversationImage } = defaultTheme as any;
@@ -65,15 +103,86 @@ export default function Home() {
     );
   }
 
+  // Avatar component: render an avatar visually similar to TalkJS's avatar.
+  // Note: TalkJS's `ConversationImage` component relies on internal TalkJS
+  // context and props; calling it directly outside of the TalkJS render
+  // tree can throw runtime errors (observed as "i is undefined"). To avoid
+  // runtime failures we render a compatible avatar here (photo or initials)
+  // which can be styled to match TalkJS. If you want the exact TalkJS
+  // component, it must be mounted inside the TalkJS component tree.
+  function Avatar({ name, src, size = 48 }: { name: string; src?: string; size?: number }) {
+    const initials = name
+      .split(" ")
+      .map((s) => s[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
+
+    // track image load failure so we can fall back to initials when the
+    // provided photo URL 404s or otherwise fails to load
+    const [imgFailed, setImgFailed] = useState(false);
+
+    // Prefer to use TalkJS's Avatar theme component if available — it
+    // reproduces the same visuals the TalkJS UI uses (background-image etc.)
+    try {
+      const { Avatar: TalkAvatar } = defaultTheme as any;
+      // Only render the TalkJS Avatar when we have a real photo URL to avoid
+      // the theme rendering `url(undefined)` which causes GET /undefined requests.
+      if (TalkAvatar && src && !imgFailed) {
+        // TalkAvatar expects prop `photoUrl` per the library implementation
+        return <TalkAvatar photoUrl={src} />;
+      }
+    } catch (e) {
+      // fall back to local rendering
+    }
+
+    if (src && !imgFailed) {
+      return (
+        <img
+          src={src}
+          alt={name}
+          width={size}
+          height={size}
+          onError={() => setImgFailed(true)}
+          style={{ borderRadius: "9999px", objectFit: "cover", display: "block", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}
+        />
+      );
+    }
+
+    const bg = "linear-gradient(135deg,#60a5fa,#7c3aed)";
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          borderRadius: "9999px",
+          background: bg,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "white",
+          fontWeight: 700,
+          fontFamily: "monospace",
+          boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+        }}
+        aria-hidden
+      >
+        {initials}
+      </div>
+    );
+  }
+  const myUserName = "Frank";
+
   // Memoize theme to avoid re-renders
   const theme = useMemo(() => ({ ChatHeader: MyChatHeader }), []);
 
   // Design viewport for consistent multiplayer view: fixed design pixels (16:9)
   const DESIGN_W = 1280;
   const DESIGN_H = 720;
-  // Maximum rectangle speed in pixels per second inside the DESIGN coordinate space
-  // Adjust this constant to tune how fast the rectangle moves when holding the control.
-  const MAX_SPEED = 600; // px / s
+  // Time it should take the paddle to travel end-to-end (design-space seconds)
+  // Using a time-based constant ensures the travel time is identical across
+  // viewport sizes because the design surface is uniformly scaled.
+  const TRAVEL_TIME = 2.0; // seconds to cross from left bound to right bound
   const [scale, setScale] = useState(1);
 
   useEffect(() => {
@@ -257,7 +366,12 @@ export default function Home() {
   const RECT_H = 36;
 
   // position x (left) in design-space coordinates
-  const [rectX, setRectX] = useState(() => Math.max(12, (DESIGN_W - RECT_W) / 2));
+  const initialRectX = Math.max(12, (DESIGN_W - RECT_W) / 2);
+  const [rectX, setRectX] = useState<number>(initialRectX);
+  // mirror rectX in a ref so the physics loop can read it without causing
+  // the physics effect to re-run on every paddle movement (which would
+  // cancel/restart the physics RAF and make the ball appear to pause).
+  const rectXRef = useRef<number>(initialRectX);
 
   const directionRef = useRef<number>(0); // -1 left, 0 idle, 1 right
   const rafRef = useRef<number | null>(null);
@@ -274,10 +388,15 @@ export default function Home() {
         lastTimeRef.current = ts;
         const dirCur = directionRef.current;
         if (dirCur !== 0) {
+          // compute speed so that full travel takes TRAVEL_TIME seconds
+          const speed = (DESIGN_W - RECT_W) / TRAVEL_TIME; // px / s in design-space
           setRectX((x) => {
-            let nx = x + dirCur * MAX_SPEED * dt;
+            let nx = x + dirCur * speed * dt;
             // clamp inside design width
             nx = Math.max(0, Math.min(DESIGN_W - RECT_W, nx));
+            // keep ref in sync so physics can read paddle position without
+            // becoming a dependency of the physics effect.
+            rectXRef.current = nx;
             return nx;
           });
         }
@@ -327,6 +446,156 @@ export default function Home() {
     };
   }, []);
 
+  // ---------- Simple physics for avatar 'ball' ----------
+  const BALL_RADIUS = 24; // design-space px (avatar radius)
+  // constant-speed behaviour: the ball travels at a fixed speed vector
+  const SPEED = 700; // px/s magnitude in design-space
+
+  // Use refs for ball position to avoid React re-renders each frame.
+  const ballXRef = useRef<number>(DESIGN_W / 2);
+  const ballYRef = useRef<number>(64);
+  const ballDomRef = useRef<HTMLDivElement | null>(null);
+
+  // velocity ref (vx, vy) in design-space px/s. Start moving downward.
+  const velRef = useRef({ x: 0, y: SPEED });
+  const physicsRaf = useRef<number | null>(null);
+  const lastPhysics = useRef<number | null>(null);
+  // respawn control: when ball falls off bottom we will respawn it in the center
+  const respawningRef = useRef<boolean>(false);
+  const blinkTimerRef = useRef<number | null>(null);
+  // track blink visibility via React state so re-renders (from paddle moves)
+  // don't inadvertently remove the runtime-applied opacity styles.
+  const [blinkVisible, setBlinkVisible] = useState<boolean>(true);
+
+  // whether a ball is currently spawned/visible (when false the ball is despawned)
+  const [spawned, setSpawned] = useState<boolean>(true);
+  const respawnTimeoutRef = useRef<number | null>(null);
+  // respawn delay in seconds (adjustable)
+  const RESPAWN_DELAY = 1.5;
+
+  useEffect(() => {
+    let mounted = true;
+    function step(ts: number) {
+      if (!mounted) return;
+      if (lastPhysics.current == null) lastPhysics.current = ts;
+      const dt = (ts - (lastPhysics.current || ts)) / 1000;
+      lastPhysics.current = ts;
+
+      // integrate constant velocity
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      // integrate into refs
+      let nextX = ballXRef.current + vx * dt;
+      if (nextX - BALL_RADIUS <= 0) {
+        velRef.current.x = Math.abs(vx);
+        nextX = BALL_RADIUS;
+      } else if (nextX + BALL_RADIUS >= DESIGN_W) {
+        velRef.current.x = -Math.abs(vx);
+        nextX = DESIGN_W - BALL_RADIUS;
+      }
+      ballXRef.current = nextX;
+
+      const nextY = ballYRef.current + vy * dt;
+      // compute paddle top y in design-space (same layout as BufferBar position)
+      const paddleTop = DESIGN_H - 96 - RECT_H;
+
+      // collision with paddle: if moving downward and crossing paddle top
+      const bx = ballXRef.current;
+      if (respawningRef.current) {
+        // while respawning, keep the ball at its set position and don't integrate
+      } else if (vy > 0 && nextY + BALL_RADIUS >= paddleTop) {
+        const paddleX = rectXRef.current;
+        if (bx >= paddleX - BALL_RADIUS && bx <= paddleX + RECT_W + BALL_RADIUS) {
+          // position ball on top of paddle and invert vertical component
+          velRef.current.y = -Math.abs(vy);
+          ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
+        } else {
+          ballYRef.current = nextY;
+        }
+      } else if (nextY - BALL_RADIUS <= 0) {
+        velRef.current.y = Math.abs(vy);
+        ballYRef.current = BALL_RADIUS;
+      } else if (nextY - BALL_RADIUS > DESIGN_H) {
+        // ball has fallen entirely off the bottom -> despawn then respawn after a delay
+        respawningRef.current = true;
+        // stop motion
+        velRef.current = { x: 0, y: 0 };
+        // clear any existing blink timer
+        if (blinkTimerRef.current != null) {
+          clearInterval(blinkTimerRef.current);
+          blinkTimerRef.current = null;
+        }
+        // hide the old ball immediately
+        setSpawned(false);
+        setBlinkVisible(false);
+        // clear previous respawn timeout if any
+        if (respawnTimeoutRef.current != null) {
+          clearTimeout(respawnTimeoutRef.current);
+          respawnTimeoutRef.current = null;
+        }
+        // after RESPAWN_DELAY seconds, place the new ball at center and blink, then resume
+        respawnTimeoutRef.current = window.setTimeout(() => {
+          respawnTimeoutRef.current = null;
+          ballXRef.current = DESIGN_W / 2;
+          ballYRef.current = 64;
+          if (ballDomRef.current) {
+            const sx = Math.round(ballXRef.current - BALL_RADIUS);
+            const sy = Math.round(ballYRef.current - BALL_RADIUS);
+            ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
+          }
+          // show and blink
+          setSpawned(true);
+          setBlinkVisible(true);
+          let flashes = 6;
+          let visible = true;
+          blinkTimerRef.current = window.setInterval(() => {
+            visible = !visible;
+            setBlinkVisible(visible);
+            flashes -= 1;
+            if (flashes <= 0) {
+              if (blinkTimerRef.current != null) {
+                clearInterval(blinkTimerRef.current);
+                blinkTimerRef.current = null;
+              }
+              setBlinkVisible(true);
+              respawningRef.current = false;
+              velRef.current = { x: 0, y: SPEED };
+            }
+          }, 180);
+        }, RESPAWN_DELAY * 1000);
+      } else if (nextY + BALL_RADIUS >= DESIGN_H) {
+        velRef.current.y = -Math.abs(vy);
+        ballYRef.current = DESIGN_H - BALL_RADIUS;
+      } else {
+        ballYRef.current = nextY;
+      }
+
+      // update DOM position directly for smooth animation
+      if (ballDomRef.current) {
+        const sx = Math.round(ballXRef.current - BALL_RADIUS);
+        const sy = Math.round(ballYRef.current - BALL_RADIUS);
+        ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
+      }
+      physicsRaf.current = requestAnimationFrame(step);
+    }
+
+    physicsRaf.current = requestAnimationFrame(step);
+    return () => {
+      mounted = false;
+      if (physicsRaf.current != null) cancelAnimationFrame(physicsRaf.current);
+      physicsRaf.current = null;
+      lastPhysics.current = null;
+      // clear any pending blink timers when unmounting
+      if (blinkTimerRef.current != null) {
+        clearInterval(blinkTimerRef.current);
+        blinkTimerRef.current = null;
+      }
+    };
+    // physics loop should run continuously; it reads `rectXRef.current`
+    // directly so we don't need to depend on `rectX` and restart the
+    // effect on every small paddle movement (which would interrupt RAF).
+  }, []);
+
   return (
     <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)", overflow: "hidden" }}>
     <main className="flex flex-col items-center justify-center gap-6" style={{ paddingBottom: 0 }}>
@@ -344,6 +613,33 @@ export default function Home() {
                 <LetterComposer onAppend={handleAppend} />
               </div>
 
+              {/* render user avatar as a physics 'ball' (positioned absolutely in design-space) */}
+              {
+                /* Ball will be positioned using ballX/ballY (center coords). */
+              }
+              <div style={{ position: "absolute", left: 0, top: 0, width: DESIGN_W, height: DESIGN_H, pointerEvents: "none" }}>
+                <div
+                  ref={ballDomRef}
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    width: BALL_RADIUS * 2,
+                    height: BALL_RADIUS * 2,
+                    transform: `translate3d(${Math.round(ballXRef.current - BALL_RADIUS)}px, ${Math.round(ballYRef.current - BALL_RADIUS)}px, 0)`,
+                    pointerEvents: spawned ? "auto" : "none",
+                    display: spawned ? "flex" : "none",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    zIndex: 10,
+                    opacity: blinkVisible ? "1" : "0",
+                    transition: "opacity 120ms linear",
+                  }}
+                >
+                  <Avatar name={myUserName} src={myPhoto} size={BALL_RADIUS * 2} />
+                </div>
+              </div>
+
               {/* chat area fills remaining space */}
               <div style={{ flex: "1 1 auto", marginTop: 8, position: "relative", display: "flex", alignItems: "stretch", justifyContent: "stretch" }}>
                 {/* Chatbox removed: we will render messages with a custom renderer / alternate theme.
@@ -358,31 +654,7 @@ export default function Home() {
                   Player
                 </div>
 
-                {/* left/right on-screen buttons (press & hold) */}
-                <div style={{ position: "absolute", left: "50%", transform: "translateX(-50%)", bottom: 72, display: "flex", gap: 12, pointerEvents: "auto" }}>
-                  <button
-                    onMouseDown={() => startMoving(-1)}
-                    onMouseUp={stopMoving}
-                    onMouseLeave={stopMoving}
-                    onTouchStart={() => startMoving(-1)}
-                    onTouchEnd={stopMoving}
-                    aria-label="Move left"
-                    style={{ padding: "12px 16px", borderRadius: 8, background: "#111827", color: "#e5e7eb", border: "none", cursor: "pointer", fontSize: 18 }}
-                  >
-                    ◀
-                  </button>
-                  <button
-                    onMouseDown={() => startMoving(1)}
-                    onMouseUp={stopMoving}
-                    onMouseLeave={stopMoving}
-                    onTouchStart={() => startMoving(1)}
-                    onTouchEnd={stopMoving}
-                    aria-label="Move right"
-                    style={{ padding: "12px 16px", borderRadius: 8, background: "#111827", color: "#e5e7eb", border: "none", cursor: "pointer", fontSize: 18 }}
-                  >
-                    ▶
-                  </button>
-                </div>
+                {/* on-screen arrow buttons removed — keyboard only (ArrowLeft / ArrowRight) */}
               </div>
 
               {/* inline buffer bar inside the fixed window so it scales */}
