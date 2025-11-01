@@ -2,6 +2,7 @@ import os, requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 from models import init_db, get_session, Question, get_next_question
 from schema import QuestionOut, AnswerIn, AnswerOut
 
@@ -11,9 +12,13 @@ TALKJS_SECRET = os.getenv("TALKJS_SECRET", "")
 DEFAULT_CONVO = os.getenv("TALKJS_CONVERSATION_ID", "quiz_room_1")
 TALKJS_BASE = "https://api.talkjs.com/v1"
 
-app = FastAPI(title="Quiz Game API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+    # (optional cleanup here)
+app = FastAPI(title="Quiz Game API", lifespan=lifespan)
 
-# CORS: adjust to your front-end origin(s)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "*"],
@@ -21,10 +26,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def startup():
-    init_db()
 
 def talkjs_post_message(conversation_id: str, body_text: str, sender_id: str = "system-bot"):
     """Send a message into TalkJS so players see results in chat."""
