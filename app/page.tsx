@@ -455,6 +455,8 @@ export default function Home() {
   const ballXRef = useRef<number>(DESIGN_W / 2);
   const ballYRef = useRef<number>(64);
   const ballDomRef = useRef<HTMLDivElement | null>(null);
+  // debug overlay DOM ref (updated from RAF) so we can display realtime values
+  const debugDomRef = useRef<HTMLDivElement | null>(null);
 
   // velocity ref (vx, vy) in design-space px/s. Start moving downward.
   const velRef = useRef({ x: 0, y: SPEED });
@@ -463,18 +465,71 @@ export default function Home() {
   // respawn control: when ball falls off bottom we will respawn it in the center
   const respawningRef = useRef<boolean>(false);
   const blinkTimerRef = useRef<number | null>(null);
+  const bottomCrossedRef = useRef<boolean>(false);
   // track blink visibility via React state so re-renders (from paddle moves)
   // don't inadvertently remove the runtime-applied opacity styles.
   const [blinkVisible, setBlinkVisible] = useState<boolean>(true);
 
   // whether a ball is currently spawned/visible (when false the ball is despawned)
   const [spawned, setSpawned] = useState<boolean>(true);
-  const respawnTimeoutRef = useRef<number | null>(null);
+  // use a deadline driven by the RAF timestamp in addition to a timeout
+  // fallback so respawn happens even if RAF is throttled/stalled.
+  const respawnDeadlineRef = useRef<number | null>(null);
+  const respawnTimerRef = useRef<number | null>(null);
   // respawn delay in seconds (adjustable)
-  const RESPAWN_DELAY = 1.5;
+  const RESPAWN_DELAY = 3.0; // default respawn time in seconds
+  // vertical spawn position in design-space pixels (increase to spawn lower)
+  const RESPAWN_Y_PX = 300; // design-space px
+
+  // helper to start the blink + resume sequence (shared between RAF and timeout)
+  function startRespawnBlink() {
+  // set position to configured spawn point (design-space px)
+  // reset bottom-crossed marker so future crossings will re-log
+  bottomCrossedRef.current = false;
+  ballXRef.current = DESIGN_W / 2;
+  ballYRef.current = RESPAWN_Y_PX;
+    if (ballDomRef.current) {
+      // position using pixel coordinates so spawn can be placed lower than center
+      const sx = Math.round(ballXRef.current - BALL_RADIUS);
+      const sy = Math.round(ballYRef.current - BALL_RADIUS);
+      ballDomRef.current.style.left = "0";
+      ballDomRef.current.style.top = "0";
+      ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
+    }
+    setSpawned(true);
+    setBlinkVisible(true);
+    // start blink interval
+    if (blinkTimerRef.current != null) {
+      clearInterval(blinkTimerRef.current);
+      blinkTimerRef.current = null;
+    }
+    let flashes = 6;
+    let visible = true;
+    blinkTimerRef.current = window.setInterval(() => {
+      visible = !visible;
+      setBlinkVisible(visible);
+      flashes -= 1;
+        if (flashes <= 0) {
+          if (blinkTimerRef.current != null) {
+            clearInterval(blinkTimerRef.current);
+            blinkTimerRef.current = null;
+          }
+          setBlinkVisible(true);
+          respawningRef.current = false;
+          // ensure pixel positioning is restored so RAF-driven translate takes over
+          if (ballDomRef.current) {
+            ballDomRef.current.style.left = "0";
+            ballDomRef.current.style.top = "0";
+          }
+          velRef.current = { x: 0, y: SPEED };
+        }
+    }, 180);
+      console.log("[game] startRespawnBlink called", { time: Date.now() });
+  }
 
   useEffect(() => {
     let mounted = true;
+    console.log("[game] physics effect mounted: starting game loop");
     function step(ts: number) {
       if (!mounted) return;
       if (lastPhysics.current == null) lastPhysics.current = ts;
@@ -503,13 +558,14 @@ export default function Home() {
       const bx = ballXRef.current;
       if (respawningRef.current) {
         // while respawning, keep the ball at its set position and don't integrate
-      } else if (vy > 0 && nextY + BALL_RADIUS >= paddleTop) {
+      } else if (vy > 0 && nextY + BALL_RADIUS >= paddleTop && nextY - BALL_RADIUS <= DESIGN_H) {
         const paddleX = rectXRef.current;
         if (bx >= paddleX - BALL_RADIUS && bx <= paddleX + RECT_W + BALL_RADIUS) {
           // position ball on top of paddle and invert vertical component
           velRef.current.y = -Math.abs(vy);
           ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
         } else {
+          // ball is crossing the paddle top but not over the paddle — it will pass through
           ballYRef.current = nextY;
         }
       } else if (nextY - BALL_RADIUS <= 0) {
@@ -528,53 +584,88 @@ export default function Home() {
         // hide the old ball immediately
         setSpawned(false);
         setBlinkVisible(false);
-        // clear previous respawn timeout if any
-        if (respawnTimeoutRef.current != null) {
-          clearTimeout(respawnTimeoutRef.current);
-          respawnTimeoutRef.current = null;
+        console.log("[game] ball fell off bottom", { ts, nextY: nextY, ballX: ballXRef.current });
+        // schedule respawn by setting a deadline (RAF timestamp in ms)
+        respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
+        console.log("[game] respawn scheduled", { deadline: respawnDeadlineRef.current, delay: RESPAWN_DELAY });
+        // also set a real timeout fallback so respawn occurs even if RAF is paused
+        if (respawnTimerRef.current != null) {
+          clearTimeout(respawnTimerRef.current);
+          respawnTimerRef.current = null;
         }
-        // after RESPAWN_DELAY seconds, place the new ball at center and blink, then resume
-        respawnTimeoutRef.current = window.setTimeout(() => {
-          respawnTimeoutRef.current = null;
-          ballXRef.current = DESIGN_W / 2;
-          ballYRef.current = 64;
-          if (ballDomRef.current) {
-            const sx = Math.round(ballXRef.current - BALL_RADIUS);
-            const sy = Math.round(ballYRef.current - BALL_RADIUS);
-            ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
-          }
-          // show and blink
-          setSpawned(true);
-          setBlinkVisible(true);
-          let flashes = 6;
-          let visible = true;
-          blinkTimerRef.current = window.setInterval(() => {
-            visible = !visible;
-            setBlinkVisible(visible);
-            flashes -= 1;
-            if (flashes <= 0) {
-              if (blinkTimerRef.current != null) {
-                clearInterval(blinkTimerRef.current);
-                blinkTimerRef.current = null;
-              }
-              setBlinkVisible(true);
-              respawningRef.current = false;
-              velRef.current = { x: 0, y: SPEED };
-            }
-          }, 180);
+        respawnTimerRef.current = window.setTimeout(() => {
+          respawnTimerRef.current = null;
+          console.log("[game] respawn timeout fired (fallback)");
+          // use the shared helper to start blink+resume
+          startRespawnBlink();
         }, RESPAWN_DELAY * 1000);
       } else if (nextY + BALL_RADIUS >= DESIGN_H) {
-        velRef.current.y = -Math.abs(vy);
-        ballYRef.current = DESIGN_H - BALL_RADIUS;
+        // ball is crossing the bottom edge; allow it to continue moving off-screen
+        ballYRef.current = nextY;
+        // Log the crossing event only once when the ball first moves past the bottom
+        if (!bottomCrossedRef.current) {
+          bottomCrossedRef.current = true;
+          console.log("[game] crossed bottom boundary (entered off-screen)", { ts, nextY, ballY: ballYRef.current, vy, respawning: respawningRef.current });
+        }
       } else {
         ballYRef.current = nextY;
       }
 
+      // If a respawn deadline was set and we've reached it, perform the respawn
+      if (respawnDeadlineRef.current != null && ts >= respawnDeadlineRef.current) {
+        respawnDeadlineRef.current = null;
+      // reset bottom-crossed marker and center spawn position (horizontal center,
+      // vertical position controlled by RESPAWN_Y_PX if provided else fraction)
+  bottomCrossedRef.current = false;
+  ballXRef.current = DESIGN_W / 2;
+  ballYRef.current = RESPAWN_Y_PX;
+        if (ballDomRef.current) {
+          const sx = Math.round(ballXRef.current - BALL_RADIUS);
+          const sy = Math.round(ballYRef.current - BALL_RADIUS);
+          ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
+        }
+        // show and blink
+        setSpawned(true);
+        setBlinkVisible(true);
+        let flashes = 6;
+        let visible = true;
+        if (blinkTimerRef.current != null) {
+          clearInterval(blinkTimerRef.current);
+          blinkTimerRef.current = null;
+        }
+        blinkTimerRef.current = window.setInterval(() => {
+          visible = !visible;
+          setBlinkVisible(visible);
+          flashes -= 1;
+          if (flashes <= 0) {
+            if (blinkTimerRef.current != null) {
+              clearInterval(blinkTimerRef.current);
+              blinkTimerRef.current = null;
+            }
+            setBlinkVisible(true);
+            respawningRef.current = false;
+            velRef.current = { x: 0, y: SPEED };
+          }
+        }, 180);
+      }
+
       // update DOM position directly for smooth animation
-      if (ballDomRef.current) {
+      if (ballDomRef.current && !respawningRef.current) {
         const sx = Math.round(ballXRef.current - BALL_RADIUS);
         const sy = Math.round(ballYRef.current - BALL_RADIUS);
+        // ensure left/top are zeroed so translate3d positions correctly
+        ballDomRef.current.style.left = "0";
+        ballDomRef.current.style.top = "0";
         ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
+      }
+
+      // Update a tiny debug overlay (text) so we can inspect values visually
+      if (debugDomRef.current) {
+        try {
+          debugDomRef.current.textContent = `y=${Math.round(ballYRef.current)} nextY=${Math.round(nextY)} vy=${Math.round(vy)} respawning=${respawningRef.current}`;
+        } catch (e) {
+          // ignore DOM write errors
+        }
       }
       physicsRaf.current = requestAnimationFrame(step);
     }
@@ -590,6 +681,8 @@ export default function Home() {
         clearInterval(blinkTimerRef.current);
         blinkTimerRef.current = null;
       }
+      // clear any pending respawn deadline
+      respawnDeadlineRef.current = null;
     };
     // physics loop should run continuously; it reads `rectXRef.current`
     // directly so we don't need to depend on `rectX` and restart the
@@ -638,6 +731,12 @@ export default function Home() {
                 >
                   <Avatar name={myUserName} src={myPhoto} size={BALL_RADIUS * 2} />
                 </div>
+                {/* small debug overlay text updated from RAF */}
+                <div
+                  ref={debugDomRef}
+                  style={{ position: "absolute", right: 12, top: 12, pointerEvents: "none", color: "#fff", fontFamily: "monospace", fontSize: 12, background: "rgba(0,0,0,0.45)", padding: "6px 8px", borderRadius: 6 }}
+                  aria-hidden
+                />
               </div>
 
               {/* chat area fills remaining space */}
