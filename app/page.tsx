@@ -1,64 +1,92 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useMemo } from "react";
+import { Chatbox, defaultTheme } from "@talkjs/react-components";
+import { getTalkSession } from "@talkjs/core";
 
 export default function Home() {
+  // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
+  // If left blank the chat will not initialize until you set it.
+  const appId = process.env.NEXT_PUBLIC_TALKJS_APP_ID || "";
+
+  // demo user ids — change these for your app's user ids
+  const userId = "frank";
+  const otherUserId = "nina";
+  const conversationId = "new_conversation";
+
+  const sessionRef = useRef<any | null>(null);
+
+  useEffect(() => {
+    if (!appId) return;
+    if (typeof window === "undefined") return;
+
+    // create a TalkJS session (uses the durhack host from the docs)
+    if (!sessionRef.current) {
+      // @ts-ignore - host is accepted by getTalkSession
+      sessionRef.current = getTalkSession({ host: "durhack.talkjs.com", appId, userId });
+    }
+
+    const session = sessionRef.current;
+
+    // create demo users and a conversation if they don't exist
+    session.currentUser.createIfNotExists({ name: "Frank" });
+    session.user(otherUserId).createIfNotExists({ name: "Nina" });
+
+    const conversation = session.conversation(conversationId);
+    conversation.createIfNotExists();
+    conversation.participant(otherUserId).createIfNotExists();
+
+    return () => {
+      // tidy up TalkJS session when component unmounts
+      try {
+        session.destroy && session.destroy();
+      } catch (e) {
+        // ignore cleanup errors
+      }
+      sessionRef.current = null;
+    };
+  }, [appId]);
+
+  // Create a simple custom ChatHeader component that uses the default ConversationImage
+  function MyChatHeader(props: any) {
+    const { ConversationImage } = defaultTheme as any;
+    return (
+      <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+        {/* Use the default conversation image for avatar */}
+        <ConversationImage common={props.common} conversation={props.common.conversation} participants={props.common.participants} />
+        <div>
+          <div style={{ fontWeight: 700 }}>Custom Chat</div>
+          <div style={{ fontSize: 12, color: "#666" }}>Durhack demo theme</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Memoize theme to avoid re-renders
+  const theme = useMemo(() => ({ ChatHeader: MyChatHeader }), []);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+    <div className="flex min-h-screen items-center justify-center bg-white">
+      <main className="flex flex-col items-center justify-center gap-6">
+        <h1 className="text-4xl font-bold">Hello world</h1>
+        <p className="mt-2 text-gray-600">Welcome to the landing page with TalkJS chat.</p>
+
+        {!appId ? (
+          <div className="mt-4 text-sm text-red-600">Set NEXT_PUBLIC_TALKJS_APP_ID in your environment to enable the chat.</div>
+        ) : (
+          <div className="mt-6">
+            <Chatbox
+              // @ts-ignore
+              host="durhack.talkjs.com"
+              style={{ width: "400px", height: "600px" }}
+              appId={appId}
+              userId={userId}
+              conversationId={conversationId}
+              // apply the basic custom theme
+              theme={theme}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );
