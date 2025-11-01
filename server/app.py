@@ -1,44 +1,46 @@
-import os, requests
-from fastapi import FastAPI, HTTPException
+import os
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
-from models import init_db, get_session, Question, get_next_question
-from schema import QuestionOut, AnswerIn, AnswerOut
-
 load_dotenv()
+print("APP_ID =", repr(os.getenv("TALKJS_APP_ID")))
+print("SECRET startswith sk_test? =", os.getenv("TALKJS_SECRET","").startswith("sk_test_"))
+
+from contextlib import asynccontextmanager
+from models import (
+    init_db, get_session, Question, get_next_question,
+    get_room_state, set_room_current_question
+)
+from schema import QuestionOut, AnswerIn, AnswerOut
+from talkjs_client import (
+    ensure_bootstrap, ensure_user, ensure_conversation, post_text,
+    make_user_token, verify_webhook_signature
+)
+
 TALKJS_APP_ID = os.getenv("TALKJS_APP_ID", "")
-TALKJS_SECRET = os.getenv("TALKJS_SECRET", "")
 DEFAULT_CONVO = os.getenv("TALKJS_CONVERSATION_ID", "quiz_room_1")
-TALKJS_BASE = "https://api.talkjs.com/v1"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
-    # (optional cleanup here)
-app = FastAPI(title="Quiz Game API", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def talkjs_post_message(conversation_id: str, body_text: str, sender_id: str = "system-bot"):
-    """Send a message into TalkJS so players see results in chat."""
-    if not (TALKJS_APP_ID and TALKJS_SECRET):
-        return
-    url = f"{TALKJS_BASE}/{TALKJS_APP_ID}/conversations/{conversation_id}/messages"
-    headers = {"Authorization": f"Bearer {TALKJS_SECRET}", "Content-Type": "application/json"}
-    payload = [{"text": body_text, "sender": sender_id, "type": "UserMessage"}]
+    # Make sure the system-bot + main room exist at startup
     try:
-        requests.post(url, json=payload, headers=headers, timeout=5)
-    except requests.RequestException:
+        ensure_bootstrap(
+            user_id="system-bot",
+            user_profile={"name": "System Bot"},
+            conversation_id=DEFAULT_CONVO,
+            include_system_bot=True,  # create convo with bot in it
+            system_bot_id="system-bot",
+            subject="IQ Brick Arena",
+        )
+    except Exception:
         pass
-# Docs for messages endpoint. :contentReference[oaicite:4]{index=4}
+    yield
+
+app = FastAPI(title="Quiz Game API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
 
 @app.get("/questions/next", response_model=QuestionOut)
 def next_question(after_id: int | None = None):
@@ -53,16 +55,133 @@ def answer(payload: AnswerIn):
         q = s.get(Question, payload.question_id)
         if not q:
             raise HTTPException(404, "Question not found")
+
         correct = (payload.choice_index == q.correct_index)
-
-        # Prepare next question
-        nxt = get_next_question(q.id)
-        next_out = None
-        if nxt:
-            next_out = {"id": nxt.id, "text": nxt.text, "answers": nxt.answers}
-
-        # Announce result in TalkJS conversation
         convo_id = payload.talk_conversation_id or DEFAULT_CONVO
-        talkjs_post_message(convo_id, f"{'✅ Correct' if correct else '❌ Incorrect'} — Q{q.id}")
+
+        post_text(convo_id, f"{'✅ Correct' if correct else '❌ Incorrect'} — Q{q.id}", sender_id="system-bot")
+
+        # Next
+        nxt = get_next_question(q.id)
+        if nxt:
+            set_room_current_question(convo_id, nxt.id)
+            post_text(
+                convo_id,
+                f"Q{nxt.id}: {nxt.text}\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(nxt.answers)),
+                sender_id="system-bot",
+            )
+            next_out = {"id": nxt.id, "text": nxt.text, "answers": nxt.answers}
+        else:
+            set_room_current_question(convo_id, None)
+            post_text(convo_id, "🎉 End of questions!", sender_id=None)
+            next_out = None
 
         return {"correct": correct, "next_question": next_out}
+
+# ---- TalkJS: token + bootstrap for the browser ----
+
+@app.get("/talkjs/session-token")
+def talkjs_session_token(user_id: str):
+    # Mint a short-lived user token for the browser (Alice, Bob, etc.)
+    ensure_user(user_id, {"name": user_id})
+    token = make_user_token(user_id)
+    return {"token": token, "appId": TALKJS_APP_ID, "conversationId": DEFAULT_CONVO}
+
+@app.post("/talkjs/bootstrap")
+def bootstrap_talkjs(user_id: str, name: str, photo_url: str | None = None):
+    ensure_bootstrap(
+        user_id=user_id,
+        user_profile={"name": name, "photoUrl": photo_url},
+        conversation_id=DEFAULT_CONVO,
+        include_system_bot=True,
+        system_bot_id="system-bot",
+        subject="IQ Brick Arena",
+    )
+
+    # If no active question yet, post the first one
+    st = get_room_state(DEFAULT_CONVO)
+    if st.current_question_id is None:
+        q = get_next_question(None)
+        if q:
+            set_room_current_question(DEFAULT_CONVO, q.id)
+            post_text(
+                DEFAULT_CONVO,
+                f"Q{q.id}: {q.text}\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(q.answers)),
+                sender_id="system-bot",
+            )
+        else:
+            post_text(DEFAULT_CONVO, "No questions available.", sender_id=None)
+    return {"ok": True, "conversationId": DEFAULT_CONVO}
+
+# ---- TalkJS webhook: grade chat answers like "A"/"1" ----
+
+@app.post("/webhooks/talkjs")
+async def talkjs_webhook(request: Request):
+    raw = await request.body()
+    sig = request.headers.get("X-TalkJS-Signature", "")
+    ts  = request.headers.get("X-TalkJS-Timestamp", "")
+    if not verify_webhook_signature(raw, sig, ts):
+        raise HTTPException(401, "Invalid webhook signature")
+
+    event = await request.json()
+    if event.get("event") == "message.sent":
+        data = event.get("data", {})
+        message = data.get("message", {}) or {}
+        sender = (message.get("sender") or {}).get("id")
+        convo_id = (data.get("conversation") or {}).get("id") or DEFAULT_CONVO
+        text = (message.get("text") or "").strip()
+
+        # Ignore bot/system messages
+        if not sender or sender == "system-bot":
+            return {"ok": True}
+
+        # Interpret A/B/C/D or 0..3
+        mapping = {"A": 0, "B": 1, "C": 2, "D": 3}
+        choice_idx = None
+        if text.upper() in mapping:
+            choice_idx = mapping[text.upper()]
+        elif text.isdigit():
+            choice_idx = int(text)
+
+        # Grade against current question for this room
+        if choice_idx is not None:
+            st = get_room_state(convo_id)
+            qid = st.current_question_id
+            if not qid:
+                post_text(convo_id, "No active question. Type /next", sender_id="system-bot")
+                return {"ok": True}
+
+            with get_session() as s:
+                q = s.get(Question, qid)
+                if not q:
+                    post_text(convo_id, "Question not found. Type /next", sender_id="system-bot")
+                    return {"ok": True}
+
+                correct = (choice_idx == q.correct_index)
+                post_text(convo_id, f"{'✅ Correct' if correct else '❌ Incorrect'} — Q{q.id}", sender_id="system-bot")
+
+                nxt = get_next_question(q.id)
+                if nxt:
+                    set_room_current_question(convo_id, nxt.id)
+                    post_text(
+                        convo_id,
+                        f"Q{nxt.id}: {nxt.text}\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(nxt.answers)),
+                        sender_id="system-bot",
+                    )
+                else:
+                    set_room_current_question(convo_id, None)
+                    post_text(convo_id, "🎉 End of questions!", sender_id=None)
+
+        elif text == "/next":
+            q = get_next_question(None)
+            if q:
+                set_room_current_question(convo_id, q.id)
+                post_text(
+                    convo_id,
+                    f"Q{q.id}: {q.text}\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(q.answers)),
+                    sender_id="system-bot",
+                )
+            else:
+                post_text(convo_id, "No questions available.", sender_id=None)
+
+    return {"ok": True}

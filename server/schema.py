@@ -9,7 +9,7 @@ class QuestionOut(BaseModel):
 class AnswerIn(BaseModel):
     question_id: int
     choice_index: int
-    talk_conversation_id: Optional[str] = None  # allow override from client
+    talk_conversation_id: Optional[str] = None
 
 class AnswerOut(BaseModel):
     correct: bool
