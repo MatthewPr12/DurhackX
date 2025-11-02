@@ -808,7 +808,20 @@ export default function Home() {
       onLetterHit: (ch: string) => {
         setBuffer((b) => {
           const nb = b + ch;
-          try { mp.sendBuffer?.(nb); } catch (e) { /* ignore */ }
+          try {
+            mp.sendBuffer?.(nb);
+            // Create a message
+
+            // Send the message
+            conversationRef.current.send(ch).then(function() {
+              console.log("Message sent!");
+            }).catch(function(error) {
+              console.error("Error sending message: ", error);
+            });
+
+          } catch (e) { /* ignore */
+            console.log(e)
+          }
           return nb;
         });
       },
