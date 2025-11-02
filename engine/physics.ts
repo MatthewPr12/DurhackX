@@ -106,13 +106,14 @@ export function startPhysics(opts: {
 
       // letter collisions when moving up
       for (const r of letterRectsRef.current) {
-        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED.current).change;
+        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED.current);
         if (colData.change) {
+          console.log("Letter hit:", r.ch);
+
           velRef.current.x = colData.newVX;
           velRef.current.y = colData.newVY;
           //ballXRef.current = colData.cx;
           //ballYRef.current = colData.cy;
-          debugDomRef.current.textContent = "COLLSISION"
           handled = true;
 
           // append letter
@@ -169,7 +170,6 @@ export function startPhysics(opts: {
             velRef.current.y = colData.newVY;
             //ballXRef.current = colData.cx;
             //ballYRef.current = colData.cy;
-            debugDomRef.current.textContent = "COLLSISION"
             handled = true;
         }
 
