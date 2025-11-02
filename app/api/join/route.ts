@@ -3,7 +3,8 @@ import { NextResponse } from 'next/server';
 type Body = { playerId?: string; name?: string; photo?: string };
 
 async function putTalkjs(path: string, body: any, appId: string, secret: string) {
-  const url = `https://api.talkjs.com/v1/${encodeURIComponent(appId)}${path}`;
+  const origin = process.env.TALKJS_API_ORIGIN || 'https://api.talkjs.com';
+  const url = `${origin}/v1/${encodeURIComponent(appId)}${path}`;
   const res = await fetch(url, {
     method: 'PUT',
     headers: {

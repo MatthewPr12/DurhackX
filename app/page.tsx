@@ -16,6 +16,8 @@ const DEFAULT_COOLDOWN_TIME_MS = 5000;
 const DISCO_AUDIO_SRC = "/api/audio/disco";
 const DISCO_FADE_MS = 600; // < 1s fade in/out
 const DISCO_TARGET_GAIN = 0.6; // perceived volume for music (0..1)
+// External quiz API base URL (for logging). Client calls are proxied via Next API to avoid CORS
+const QUIZ_API_BASE = process.env.NEXT_PUBLIC_QUIZ_API_BASE || "https://durhack1.enego.co.uk";
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -50,6 +52,8 @@ export default function Home() {
 
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
+  // Track current quiz question id from bot messages (e.g., "Q12: ...")
+  const currentQuestionIdRef = useRef<number | null>(null);
   // username chosen in start modal and session-start flag (used by TalkJS init)
   const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
   const [started, setStarted] = useState<boolean>(false);
@@ -116,7 +120,7 @@ export default function Home() {
         }
         conversation.participant(otherUserId).createIfNotExists();
         // keep a reference to the conversation so UI components can send messages
-        conversationRef.current = conversation;
+  conversationRef.current = conversation;
         try {
           // Log the conversation id used locally so we can verify both pages
           // are joining the same TalkJS conversation.
@@ -176,6 +180,14 @@ export default function Home() {
           const text = message && (message.text || message.body || message.content || message.message || message.displayText) || message;
           const sender = message && (message.sender && (message.sender.id || message.sender) || message.from && (message.from.id || message.from) || message.senderId) || 'unknown';
           console.log('[talk] message received', { text, from: sender, raw: message });
+          // Parse bot-posted question lines like "Q12: ..." to track current question id
+          if (typeof text === 'string') {
+            const m = text.match(/^Q(\d+):/);
+            if (m && m[1]) {
+              const qid = parseInt(m[1], 10);
+              if (Number.isFinite(qid)) currentQuestionIdRef.current = qid;
+            }
+          }
         });
       } else if (typeof conv.on === 'function') {
         const cb = (m: any) => {
@@ -189,6 +201,13 @@ export default function Home() {
           const text = m && (m.text || m.body || m.content || m.displayText) || m;
           const sender = m && (m.sender && (m.sender.id || m.sender) || m.from && (m.from.id || m.from) || m.senderId) || 'unknown';
           console.log('[talk] message received', { text, from: sender, raw: m });
+          if (typeof text === 'string') {
+            const m2 = text.match(/^Q(\d+):/);
+            if (m2 && m2[1]) {
+              const qid = parseInt(m2[1], 10);
+              if (Number.isFinite(qid)) currentQuestionIdRef.current = qid;
+            }
+          }
         };
         conv.on('message', cb);
         unsub = () => conv.off && conv.off('message', cb);
@@ -588,13 +607,38 @@ export default function Home() {
     }
     const text = buffer.trim();
     if (!text) return setBuffer("");
+    // Map single-letter or numeric answers to choice indices
+    const upper = text.toUpperCase();
+    const letterIdx = upper.length === 1 && upper >= 'A' && upper <= 'Z' ? upper.charCodeAt(0) - 'A'.charCodeAt(0) : null;
+    const numIdx = /^[0-9]+$/.test(text) ? parseInt(text, 10) : null;
+    const choiceIndex = (letterIdx !== null ? letterIdx : (numIdx !== null ? numIdx : null));
+
+    if (choiceIndex !== null && currentQuestionIdRef.current != null) {
+      // Send answer to external quiz API; it will post feedback + next question via TalkJS
+      try {
+        const resp = await fetch(`/api/quiz/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            question_id: currentQuestionIdRef.current,
+            choice_index: choiceIndex,
+            talk_conversation_id: CONVERSATION_ID,
+          }),
+        });
+        const body = await resp.text();
+        try { console.log('[quiz] /answer', resp.status, body ? JSON.parse(body) : null); } catch { console.log('[quiz] /answer', resp.status, body); }
+      } catch (e) {
+        console.error('[quiz] /answer failed', e);
+      }
+      setBuffer("");
+      return;
+    }
+
+    // Fallback: normal chat message
     try {
       await conv.send(text);
-      // Log that we sent a message (sender is current user)
-      // Use a short console tag so devs can easily grep messages.
       console.log('[talk] message sent', { text, from: userId });
     } catch (e) {
-      // eslint-disable-next-line no-console
       console.error("TalkJS send failed", e);
     }
     setBuffer("");
@@ -684,6 +728,20 @@ export default function Home() {
       window.removeEventListener("keyup", onKeyUp);
     };
   }, []);
+
+  // On start/join, also bootstrap the external quiz server so it posts the current/first question
+  useEffect(() => {
+    if (!started || !userId) return;
+    const name = myUserName || userId;
+    const photo = myPhoto || '';
+    fetch(`/api/quiz/bootstrap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, name, photo_url: photo }),
+    }).then(async (r) => {
+      try { console.log('[quiz] bootstrap (proxied)', r.status, await r.text()); } catch {}
+    }).catch((e) => console.warn('[quiz] bootstrap failed', e));
+  }, [started, userId, myUserName, myPhoto]);
 
   // cleanup on unmount: ensure any running RAF is cancelled
   useEffect(() => {
