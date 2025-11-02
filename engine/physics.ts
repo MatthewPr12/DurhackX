@@ -3,20 +3,12 @@ import {useRef} from "react";
 
 export type LetterRect = { x: number; y: number; w: number; h: number; idx: number; ch: string };
 
-export function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number, ballVX?: number, ballVY?: number, boxVX?: number, boxVY?: number, ballSPEED) {
+export function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number) {
   const closestX = Math.max(r.x, Math.min(cx, r.x + r.w));
   const closestY = Math.max(r.y, Math.min(cy, r.y + r.h));
   const dx = cx - closestX;
   const dy = cy - closestY;
-  const collided = dx * dx + dy * dy <= radius * radius;
-  const overlap = (radius - Math.sqrt(dx * dx + dy * dy))*1.1;
-  if (!collided) {
-    return {change : collided, newVX: 0, newVY: 0, cx: cx , cy: cy};
-  } else {
-    const alpha = Math.PI/2 - Math.atan2(ballVX, ballVY);
-    const beta = alpha
-    return {change : collided, newVX: ballSPEED * Math.cos(2* Math.PI - beta), newVY: ballSPEED * Math.sin(2* Math.PI - beta), cx : overlap * dx + cx, cy : overlap * dy + cy};
-  }
+  return dx * dx + dy * dy <= radius * radius;
 }
 
 export function startPhysics(opts: {
@@ -31,17 +23,19 @@ export function startPhysics(opts: {
   respawnDeadlineRef: React.MutableRefObject<number | null>;
   respawnTimerRef: React.MutableRefObject<number | null>;
   ballDomRef: React.MutableRefObject<HTMLElement | null>;
-  debugDomRef: React.MutableRefObject<HTMLElement | null>;
   setSpawned: (v: boolean) => void;
   setBlinkVisible: (v: boolean) => void;
   // callback used when a letter box is hit by the local ball
   onLetterHit?: (ch: string) => void;
+  // optional callback when the ball falls off screen (despawn moment)
+  onDespawn?: () => void;
   DESIGN_W: number;
   DESIGN_H: number;
   RECT_W: number;
   RECT_H: number;
   BALL_RADIUS_REF: React.MutableRefObject<number>;
   SPEED: number;
+  SPEED_MULTIPLIER_REF?: React.MutableRefObject<number>;
   RESPAWN_DELAY: number;
   // other players' paddles (in design-space) — array of { x, w }
   otherPaddlesRef?: React.MutableRefObject<Array<{ x: number; w: number }>>;
@@ -58,8 +52,7 @@ export function startPhysics(opts: {
     bottomCrossedRef,
     respawnDeadlineRef,
     respawnTimerRef,
-    ballDomRef,
-    debugDomRef,
+  ballDomRef,
   setSpawned,
   setBlinkVisible,
   onLetterHit,
@@ -70,21 +63,47 @@ export function startPhysics(opts: {
     BALL_RADIUS_REF,
     SPEED,
     RESPAWN_DELAY,
+    onDespawn,
     startRespawnBlink,
   } = opts;
 
   let mounted = true;
   let lastPhysics: number | null = null;
   let physicsRaf: number | null = null;
+  // Track previous local paddle position to estimate paddle velocity for
+  // applying "english" (spin) to the ball on contact.
+  let prevPaddleX: number | null = null;
 
+  function clamp(v: number, lo: number, hi: number) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  // Set velocity vector by an upward-facing bounce angle (0 = straight up).
+  function setVelocityFromAngle(angleRad: number, speedMag: number) {
+    const vx = speedMag * Math.sin(angleRad);
+    const vy = -Math.abs(speedMag * Math.cos(angleRad)); // always bounce upward
+    velRef.current = { x: vx, y: vy };
+  }
+
+  // Ensure the speed magnitude remains approximately SPEED.
+  function normalizeSpeed(speedMag: number) {
+    const vx = velRef.current.x;
+    const vy = velRef.current.y;
+    const mag = Math.hypot(vx, vy) || 1;
+    const scale = speedMag / mag;
+    velRef.current = { x: vx * scale, y: vy * scale };
+  }
   function step(ts: number) {
     if (!mounted) return;
     if (lastPhysics == null) lastPhysics = ts;
     const dt = (ts - (lastPhysics || ts)) / 1000;
     lastPhysics = ts;
 
-    const vx = velRef.current.x;
-    const vy = velRef.current.y;
+    // Recompute current target speed magnitude each frame so bounces respect live multipliers
+    const SPEED_CUR = SPEED * (opts.SPEED_MULTIPLIER_REF?.current ?? 1);
+
+  const vx = velRef.current.x;
+  const vy = velRef.current.y;
 
     // integrate horizontal
     let nextX = ballXRef.current + vx * dt;
@@ -92,46 +111,59 @@ export function startPhysics(opts: {
     if (nextX - BALL_RADIUS <= 0) {
       velRef.current.x = Math.abs(vx);
       nextX = BALL_RADIUS;
+      // Safety: avoid perfectly horizontal wall ping-pong
+      const MIN_VERT = SPEED_CUR * 0.12;
+      if (Math.abs(velRef.current.y) < MIN_VERT) {
+        velRef.current.y = (velRef.current.y >= 0 ? MIN_VERT : -MIN_VERT);
+        normalizeSpeed(SPEED_CUR);
+      }
     } else if (nextX + BALL_RADIUS >= DESIGN_W) {
       velRef.current.x = -Math.abs(vx);
       nextX = DESIGN_W - BALL_RADIUS;
+      const MIN_VERT = SPEED_CUR * 0.12;
+      if (Math.abs(velRef.current.y) < MIN_VERT) {
+        velRef.current.y = (velRef.current.y >= 0 ? MIN_VERT : -MIN_VERT);
+        normalizeSpeed(SPEED_CUR);
+      }
     }
     ballXRef.current = nextX;
 
-    const nextY = ballYRef.current + vy * dt;
-  const paddleTop = DESIGN_H - 96 - RECT_H;
+  const nextY = ballYRef.current + vy * dt;
+    const paddleTop = DESIGN_H - 96 - RECT_H;
     const bx = ballXRef.current;
+    // Estimate paddle velocity (px/s) based on last position sample
+    const paddleXNow = rectXRef.current;
+    const paddleVx = prevPaddleX == null ? 0 : (paddleXNow - prevPaddleX) / (dt || 1/60);
+    prevPaddleX = paddleXNow;
 
     if (!respawningRef.current) {
       let handled = false;
 
       // letter collisions when moving up
-      for (const r of letterRectsRef.current) {
-        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED);
-        if (colData.change) {
-          velRef.current.x = colData.newVX;
-          velRef.current.y = colData.newVY;
-          ballXRef.current = colData.cx;
-          ballYRef.current = colData.cy;
-          handled = true;
-
-          // append letter
-          try {
-            const letter = r.ch || String.fromCharCode(65 + r.idx);
-            if (onLetterHit) onLetterHit(letter);
-          } catch (e) {
-            // ignore
+      if (vy < 0 && letterRectsRef.current.length > 0) {
+        for (const r of letterRectsRef.current) {
+          if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
+            velRef.current.y = Math.abs(vy);
+            ballYRef.current = r.y + r.h + BALL_RADIUS;
+            // append letter
+            try {
+              const letter = r.ch || String.fromCharCode(65 + r.idx);
+              if (onLetterHit) onLetterHit(letter);
+            } catch (e) {
+              // ignore
+            }
+            handled = true;
+            break;
           }
-          handled = true;
-          break;
         }
       }
-
 
       // top boundary bounce
       if (!handled && nextY - BALL_RADIUS <= 0) {
         velRef.current.y = Math.abs(vy);
         ballYRef.current = BALL_RADIUS;
+        // keep magnitude consistent with current speed multiplier
+        normalizeSpeed(SPEED_CUR);
         handled = true;
       }
 
@@ -145,6 +177,7 @@ export function startPhysics(opts: {
         }
         setSpawned(false);
         setBlinkVisible(false);
+        try { onDespawn && onDespawn(); } catch {}
         // schedule respawn
   respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
         if (respawnTimerRef.current != null) {
@@ -159,26 +192,58 @@ export function startPhysics(opts: {
       }
 
       // paddle collision (downwards) — check local paddle and remote paddles
-      if (!handled) {
+      if (!handled && vy > 0) {
         // local paddle
         const paddleX = rectXRef.current;
         const localRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
-        const colData = rectCircleCollides(localRect, ballXRef.current, ballYRef.current, BALL_RADIUS, vx, vy, 0, 0, SPEED)
-        if (colData.change) {
-            velRef.current.x = colData.newVX;
-            velRef.current.y = colData.newVY;
-            ballXRef.current = colData.cx;
-            ballYRef.current = colData.cy;
-            handled = true;
-
+        if (rectCircleCollides(localRect, bx, nextY, BALL_RADIUS)) {
+          // Compute hit offset relative to paddle center (-1 left .. +1 right)
+          const center = paddleX + RECT_W / 2;
+          const offset = clamp((bx - center) / (RECT_W / 2), -1, 1);
+          // Max deflection angle from vertical (e.g., 60deg)
+          const MAX_ANGLE = Math.PI / 3;
+          let angle = offset * MAX_ANGLE;
+          // Add a bit of "english" from paddle movement
+          const SPIN_FACTOR = 0.0015; // radians per (px/s)
+          angle += clamp(paddleVx * SPIN_FACTOR, -MAX_ANGLE * 0.5, MAX_ANGLE * 0.5);
+          // Final clamp to avoid near-horizontal rebounds
+          angle = clamp(angle, -MAX_ANGLE + 0.05, MAX_ANGLE - 0.05);
+          setVelocityFromAngle(angle, SPEED_CUR);
+          // Avoid near-vertical bounces: ensure a minimum horizontal component
+          const MIN_HORIZ = SPEED_CUR * 0.15;
+          const MIN_VERT = SPEED_CUR * 0.12;
+          if (Math.abs(velRef.current.x) < MIN_HORIZ) {
+            velRef.current.x = (velRef.current.x >= 0 ? 1 : -1) * MIN_HORIZ;
+          }
+          if (Math.abs(velRef.current.y) < MIN_VERT) {
+            velRef.current.y = -MIN_VERT; // always bounce upward from paddle
+          }
+          normalizeSpeed(SPEED_CUR);
+          ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
+          handled = true;
         }
 
         // remote paddles
         if (!handled && opts.otherPaddlesRef && opts.otherPaddlesRef.current.length > 0) {
           for (const p of opts.otherPaddlesRef.current) {
             const r = { x: p.x, y: paddleTop, w: p.w || RECT_W, h: RECT_H };
-            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED).change) {
-              velRef.current.y = -Math.abs(vy);
+            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
+              const center = r.x + (r.w || RECT_W) / 2;
+              const offset = clamp((bx - center) / ((r.w || RECT_W) / 2), -1, 1);
+              const MAX_ANGLE = Math.PI / 3;
+              let angle = offset * MAX_ANGLE;
+              // Clamp to avoid near-horizontal rebounds
+              angle = clamp(angle, -MAX_ANGLE + 0.05, MAX_ANGLE - 0.05);
+              setVelocityFromAngle(angle, SPEED_CUR);
+              const MIN_HORIZ = SPEED_CUR * 0.15;
+              const MIN_VERT = SPEED_CUR * 0.12;
+              if (Math.abs(velRef.current.x) < MIN_HORIZ) {
+                velRef.current.x = (velRef.current.x >= 0 ? 1 : -1) * MIN_HORIZ;
+              }
+              if (Math.abs(velRef.current.y) < MIN_VERT) {
+                velRef.current.y = -MIN_VERT;
+              }
+              normalizeSpeed(SPEED_CUR);
               ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
               handled = true;
               break;
@@ -232,11 +297,9 @@ export function startPhysics(opts: {
           }
           setBlinkVisible(true);
           respawningRef.current = false;
-          let Theta = Math.PI + (Math.random() * Math.PI);
-          velRef.current.x = SPEED * Math.cos(Theta);
-          const vx = velRef.current.x;
-          velRef.current.y =  SPEED * -Math.sin(Theta);
-          const vy = velRef.current.y;
+          const R = (Math.random() * 0.5 + 0.25) * Math.PI * 2;
+          const SPEED_CUR2 = SPEED * (opts.SPEED_MULTIPLIER_REF?.current ?? 1);
+          velRef.current = { x: SPEED_CUR2 * Math.sin(R), y: SPEED_CUR2 * Math.abs(Math.cos(R)) };
         }
       }, 180);
     }
@@ -250,12 +313,7 @@ export function startPhysics(opts: {
       ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
     }
 
-    // debug overlay
-    if (debugDomRef.current) {
-      try {
-        //debugDomRef.current.textContent = `y=${Math.round(ballYRef.current)} nextY=${Math.round(nextY)} vy=${Math.round(vy)} respawning=${respawningRef.current}`;
-      } catch (e) {}
-    }
+    // debug overlay removed
 
     physicsRaf = requestAnimationFrame(step);
   }

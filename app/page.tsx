@@ -5,6 +5,12 @@ import { defaultTheme } from "@talkjs/react-components";
 import { getTalkSession } from "@talkjs/core";
 import durhackTheme, { Avatar } from "../engine/talkTheme";
 import createMultiplayer from "../engine/multiplayer";
+import { useEmojiSpawner } from "../engine/emoji-spawner";
+
+// Feature flag: toggle emoji spawner globally for this page
+const ENABLE_SPAWNER = true;
+// Default power-up cooldown duration (ms)
+const DEFAULT_COOLDOWN_TIME_MS = 5000;
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -13,9 +19,10 @@ export default function Home() {
   // demo user id. Use a stable server-safe default and hydrate a query-param
   // override on the client to avoid hydration mismatches between server and
   // client renders (don't call window or Math.random during render).
-  const [userId, setUserId] = useState<string>(() => process.env.NEXT_PUBLIC_USER_ID);
+  // Align with main: let env provide a stable id (may be undefined in TS types)
+  // Use a narrow assertion to keep the exact shape while compiling under strict TS.
+  const [userId, setUserId] = useState<string>(() => (process.env.NEXT_PUBLIC_USER_ID as unknown as string));
   const otherUserId = "system-bot";
-
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -38,137 +45,101 @@ export default function Home() {
 
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
+  // username chosen in start modal and session-start flag (used by TalkJS init)
   const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
   const [started, setStarted] = useState<boolean>(false);
+
   useEffect(() => {
-  (async function init() {
-      if (!appId) return;
-      if (typeof window === "undefined") return;
-      if (!started) return;
+    if (!appId) return;
+    if (typeof window === "undefined") return;
+    // don't initialize until the user explicitly started (or a saved session restored)
+    if (!started) return;
 
-      if (!sessionRef.current) {
-          const host = process.env.NEXT_PUBLIC_TALKJS_HOST; // e.g. "durhack.talkjs.com"
-          // @ts-ignore host is accepted by TalkJS
-          sessionRef.current = host
-            ? getTalkSession({ appId, userId, host })
-            : getTalkSession({ appId, userId });
+    // create a TalkJS session (allow env host override like main branch)
+    if (!sessionRef.current) {
+      const host = process.env.NEXT_PUBLIC_TALKJS_HOST;
+      const opts: any = host ? { appId, userId, host } : { appId, userId };
+      sessionRef.current = getTalkSession(opts);
+    }
+
+    const session = sessionRef.current;
+
+    // Create user/participant server-side first (avoid USER_NOT_FOUND race).
+    // After the server confirms, perform local SDK createIfNotExists and
+    // conversation setup.
+    let cancelled = false;
+    (async function init() {
+      try {
+        // Use our Next.js API route to bootstrap the TalkJS user + participant
+        // on the server (avoids CORS and keeps the secret on the server).
+        const resp = await fetch(`/api/join`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            playerId: userId || "player",
+            name: (typeof myUserName !== 'undefined' && myUserName) || userId || "Player",
+            photo: initialPhoto || undefined,
+            conversationId,
+          }),
+        });
+        if (!cancelled && resp.ok) {
+          // try to parse response, but treat any 2xx as success
+          try { await resp.json(); } catch (e) {}
+          setJoinConfirmed(true);
+        } else {
+          console.error("/api/join failed", resp.status, await resp.text());
         }
-      const session = sessionRef.current;
+      } catch (e) {
+        console.error("/api/join error", e);
+      }
 
-      let cancelled = false;
+      // Only touch the TalkJS SDK after the server join attempt above.
+      try {
+  // Best-effort: if joinConfirmed was set we proceed; in case the
+  // server responded slowly we still try the safe SDK calls here.
+  session.currentUser.createIfNotExists({ name: userId || "Player", photoUrl: initialPhoto || undefined });
+        session.user(otherUserId).createIfNotExists({ name: "Nina" });
+
+        const conversation = session.conversation(conversationId);
+        conversation.createIfNotExists();
+        // Ensure the current user is actually a participant so that
+        // messages are visible to all subscribers across pages.
         try {
-          const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
-          const qs = new URLSearchParams({
-            user_id: userId || "player",
-            name: (myUserName || userId || "Player"),
-          });
-          if (initialPhoto) qs.set("photo_url", initialPhoto);
-          const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
-            method: "POST",
-            headers: { Accept: "application/json" },
-          });
-          if (!cancelled && resp.ok) setJoinConfirmed(true);
-          else console.error("/talkjs/bootstrap failed", resp.status, await resp.text());
+          conversation.participant(userId).createIfNotExists();
         } catch (e) {
-          console.error("/talkjs/bootstrap error", e);
+          // ignore participant add errors
         }
-
+        conversation.participant(otherUserId).createIfNotExists();
+        // keep a reference to the conversation so UI components can send messages
+        conversationRef.current = conversation;
         try {
-          session.currentUser.createIfNotExists({
-            name: myUserName || "Player",
-            photoUrl: initialPhoto || undefined
-          });
-          session.user(otherUserId).createIfNotExists({ name: "Nina" });
-
-          const conversation = session.conversation(conversationId);
-          conversation.createIfNotExists();
-          conversation.participant(otherUserId).createIfNotExists();
-          conversationRef.current = conversation;  // ✅ set ref only after ready
+          // Log the conversation id used locally so we can verify both pages
+          // are joining the same TalkJS conversation.
+          // conversationId is the canonical id we pass; conversation.id may
+          // be present depending on SDK shape.
+          // eslint-disable-next-line no-console
+          console.log('[talk] main page conversation id', { conversationId, convId: (conversation ? (conversation as any).id : undefined) });
         } catch (e) {
-          console.error("TalkJS SDK init error", e);
+          // ignore logging errors
         }
-      })();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("TalkJS SDK init error", e);
+      }
+    })();
 
-      return () => {
-        // When this effect cleans up (route change/unmount), mark refs as unusable
-        try { session.destroy && session.destroy(); } catch {}
-        conversationRef.current = null;          // ✅ prevent future sends
-        sessionRef.current = null;
-      };
-    }, [appId, started]);
-
-  // useEffect(() => {
-  //   if (!appId) return;
-  //   if (typeof window === "undefined") return;
-  //   // don't initialize until the user explicitly started (or a saved session restored)
-  //   if (!started) return;
-  //
-  //   // create a TalkJS session (uses the durhack host from the docs)
-  //   if (!sessionRef.current) {
-  //     // @ts-ignore - host is accepted by getTalkSession
-  //     sessionRef.current = getTalkSession({ appId, userId });
-  //   }
-  //
-  //   const session = sessionRef.current;
-  //
-  //   // Create user/participant server-side first (avoid USER_NOT_FOUND race).
-  //   // After the server confirms, perform local SDK createIfNotExists and
-  //   // conversation setup.
-  //   let cancelled = false;
-  //   (async function init() {
-  //     try {
-  //       // Use the userId as a safe fallback for name here to avoid
-  //       // referencing state that may be declared later in the file.
-  //       const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
-  //       const qs = new URLSearchParams({
-  //         user_id: userId || "player",
-  //         name: (myUserName || userId || "Player"),
-  //       });
-  //       if (initialPhoto) qs.set("photo_url", initialPhoto); // optional
-  //
-  //       const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
-  //         method: "POST",
-  //         headers: { "Accept": "application/json" },
-  //       });
-  //       if (!cancelled && resp.ok) {
-  //         setJoinConfirmed(true);
-  //       } else {
-  //         // eslint-disable-next-line no-console
-  //         console.error("/api/join failed", resp.status, await resp.text());
-  //       }
-  //     } catch (e) {
-  //       // eslint-disable-next-line no-console
-  //       console.error("/api/join error", e);
-  //     }
-  //
-  //     // Only touch the TalkJS SDK after the server join attempt above.
-  //     try {
-  // // Best-effort: if joinConfirmed was set we proceed; in case the
-  // // server responded slowly we still try the safe SDK calls here.
-  // session.currentUser.createIfNotExists({ name: myUserName || "Player", photoUrl: initialPhoto || undefined });
-  //       session.user(otherUserId).createIfNotExists({ name: "Nina" });
-  //
-  //       const conversation = session.conversation(conversationId);
-  //       conversation.createIfNotExists();
-  //       conversation.participant(otherUserId).createIfNotExists();
-  //       // keep a reference to the conversation so UI components can send messages
-  //       conversationRef.current = conversation;
-  //     } catch (e) {
-  //       // eslint-disable-next-line no-console
-  //       console.error("TalkJS SDK init error", e);
-  //     }
-  //   })();
-  //
-  //   return () => {
-  //     // tidy up TalkJS session when component unmounts
-  //     try {
-  //       session.destroy && session.destroy();
-  //     } catch (e) {
-  //       // ignore cleanup errors
-  //     }
-  //     sessionRef.current = null;
-  //   };
-  // }, [appId, userId, initialPhoto]);
+    return () => {
+      // tidy up TalkJS session when component unmounts
+      try {
+        session.destroy && session.destroy();
+      } catch (e) {
+        // ignore cleanup errors
+      }
+      // Prevent future sends and free references
+      conversationRef.current = null;
+      sessionRef.current = null;
+    };
+  }, [appId, started]);
 
   // Subscribe to TalkJS conversation messages and log them to the console.
   useEffect(() => {
@@ -229,6 +200,30 @@ export default function Home() {
     };
   }, [joinConfirmed, userId]);
 
+  // Best-effort: when the tab/window closes, remove this player from the
+  // conversation participants on the server to keep the roster clean.
+  useEffect(() => {
+    if (!started || !userId) return;
+    const payload = JSON.stringify({ playerId: userId, conversationId });
+    const onUnload = () => {
+      try {
+        // Use Beacon API so it can complete during page unload
+        navigator.sendBeacon('/api/leave', payload);
+      } catch (e) {
+        // Fallback to fetch with keepalive
+        try {
+          fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
+        } catch (e2) { /* ignore */ }
+      }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    window.addEventListener('pagehide', onUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onUnload);
+      window.removeEventListener('pagehide', onUnload);
+    };
+  }, [started, userId]);
+
   
 
   // Try to read the current user's photo from the TalkJS session where possible.
@@ -266,8 +261,6 @@ export default function Home() {
 
   // user name and session state (start modal). Persist in sessionStorage so
   // opening another tab or reloading keeps the same identity during testing.
-
-  
 
   // When the user starts a session (enters their name), ensure the TalkJS
   // currentUser reflects the chosen name and photo.
@@ -316,16 +309,22 @@ export default function Home() {
   // Allow the user to change their display name during a session. This
   // disconnects the multiplayer client, clears the saved session, and
   // re-opens the Start modal so the user can re-enter their name.
-    function handleChangeName() {
-      try { mp.disconnect(); } catch {}
-      try { window.sessionStorage.removeItem('durhack_session'); } catch {}
-      setStarted(false);
-      setMyUserName("");
-      setUserId("");
-      setMyPhoto(undefined);
-      conversationRef.current = null;   // ✅
+  function handleChangeName() {
+    try {
+      mp.disconnect();
+    } catch (e) {
+      // ignore
     }
-
+    try {
+      if (typeof window !== 'undefined') window.sessionStorage.removeItem('durhack_session');
+    } catch (e) {
+      // ignore
+    }
+    setStarted(false);
+    setMyUserName("");
+    setUserId("");
+    setMyPhoto(undefined);
+  }
 
   // Memoize theme to avoid unnecessary re-allocations. We export a theme
   // object from `lib/talkTheme.tsx` — pass that into TalkJS components when
@@ -352,24 +351,23 @@ export default function Home() {
   // alphabet letter as a separate coloured box (with space between) and leaves
   // the typed buffer in a fixed bottom bar like a normal chat input area.
   // accept external btnRefs so parent can compute collisions in design-space
-  function LetterComposer({ onAppend, btnRefs }: { onAppend?: (ch: string) => void; btnRefs?: React.MutableRefObject<Array<HTMLButtonElement | null>> }) {
+  function LetterComposer({ onAppend, btnRefs }: { onAppend?: (ch: string) => void; btnRefs?: React.MutableRefObject<Array<HTMLElement | null>> }) {
     const letters = Array.from(Array(26)).map((_, i) => String.fromCharCode(65 + i));
     // use provided refs if available otherwise fall back to internal
-    const localBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+    const localBtnRefs = useRef<Array<HTMLElement | null>>([]);
     const btnRefsInternal = btnRefs || localBtnRefs;
 
     function pushLetter(l: string) {
       if (onAppend) onAppend(l);
     }
 
-  function renderButton(l: string, i: number, btnRefsRef: React.MutableRefObject<Array<HTMLButtonElement | null>>) {
+  function renderButton(l: string, i: number) {
       // map index -> hue across 0..320 degrees (rainbow) for smooth color map
       const hue = Math.round((i / 25) * 320); // 0..320
       const bg = `hsl(${hue} 85% 50%)`;
       return (
         <button
           key={l}
-          ref={(el) => { btnRefsRef.current[i] = el }}
           aria-label={`Insert ${l}`}
           tabIndex={-1}
           aria-disabled={true}
@@ -389,6 +387,8 @@ export default function Home() {
             fontWeight: 700,
             boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
             width: "100%",
+            position: 'relative',
+            zIndex: 1,
             // ensure background-color uses modern color syntax if the browser
             // supports it; fallback is still the HSL string above.
             backgroundColor: bg,
@@ -406,7 +406,15 @@ export default function Home() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(26, minmax(0, 1fr))", gap: 8, paddingBottom: 4 }}>
             {letters.map((l, i) => (
               // render each button to occupy one grid column so all 26 fit a single row
-              <div key={l} style={{ width: "100%" }}>{renderButton(l, i, btnRefsInternal)}</div>
+              <div
+                key={l}
+                ref={(el) => { btnRefsInternal.current[i] = el as HTMLElement; }}
+                style={{ width: "100%", position: "relative", overflow: "visible", willChange: "transform" }}
+              >
+                {/* persistent background layer for pulse (behind text) */}
+                <div className="letter-pulse-bg" aria-hidden style={{ position: 'absolute', inset: 0, borderRadius: 8, background: '#ffffff', opacity: 0, pointerEvents: 'none', zIndex: 0 }} />
+                {renderButton(l, i)}
+              </div>
             ))}
           </div>
         </div>
@@ -492,6 +500,7 @@ export default function Home() {
   // interpolation.
   const playersDisplayRef = useRef<Record<string, { paddleX: number; ball: { x: number; y: number; r: number }; ballV?: { x: number; y: number }; samples?: Array<{ x: number; y: number; r: number; t: number }> }>>({});
   const displayRafRef = useRef<number | null>(null);
+  const debugRafRef = useRef<number | null>(null);
   const mp = useMemo(() => createMultiplayer(), []);
 
   // derive a consistent color per player id so each client shows a unique
@@ -619,7 +628,9 @@ export default function Home() {
         const dirCur = directionRef.current;
         if (dirCur !== 0) {
           // compute speed so that full travel takes TRAVEL_TIME seconds
-          const speed = (DESIGN_W - RECT_W) / TRAVEL_TIME; // px / s in design-space
+          // apply current speed multiplier (e.g., fire power-up) to paddle too
+          const boost = (speedMultiplierRef && typeof speedMultiplierRef.current === 'number') ? speedMultiplierRef.current : 1;
+          const speed = ((DESIGN_W - RECT_W) / TRAVEL_TIME) * boost; // px / s in design-space
           setRectX((x) => {
             let nx = x + dirCur * speed * dt;
             // clamp inside design width
@@ -700,14 +711,93 @@ export default function Home() {
   // design inner container ref (the scaled design surface) so we can compute
   // element positions in design-space by converting client rects -> design coords
   const designInnerRef = useRef<HTMLDivElement | null>(null);
-  // parent-held refs for letter button DOM nodes (populated by LetterComposer)
-  const composerBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // parent-held refs for letter cell wrapper DOM nodes (populated by LetterComposer)
+  const composerBtnRefs = useRef<Array<HTMLElement | null>>([]);
   // precomputed letter button rects in design-space (x,y,width,height)
   // includes index and character so collisions can append the correct letter
   const letterRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; idx: number; ch: string }>>([]);
 
   // velocity ref (vx, vy) in design-space px/s. Start moving downward.
-  const velRef = useRef({ x: 0, y: -SPEED });
+  const velRef = useRef({ x: 0, y: SPEED });
+  // Speed multiplier for temporary effects (e.g., fire boost)
+  const speedMultiplierRef = useRef<number>(1);
+  const [activePowerups, setActivePowerups] = useState<Array<{ type: string; expiresAt: number }>>([]);
+  const activePowerupsRef = useRef<Array<{ type: string; expiresAt: number }>>([]);
+  useEffect(() => { activePowerupsRef.current = activePowerups; }, [activePowerups]);
+  // Per-powerup timers
+  const powerupTimersRef = useRef<Record<string, number>>({});
+
+  function clearAllPowerups() {
+    // Reset speed multiplier and cancel timers
+    speedMultiplierRef.current = 1;
+    for (const k in powerupTimersRef.current) {
+      clearTimeout(powerupTimersRef.current[k]);
+    }
+    powerupTimersRef.current = {} as Record<string, number>;
+    setActivePowerups([]);
+    activePowerupsRef.current = [];
+    // Rescale velocity back to base immediately
+    const vx = velRef.current.x;
+    const vy = velRef.current.y;
+    const mag = Math.hypot(vx, vy) || 1;
+    const target = SPEED * 1;
+    const scale = target / mag;
+    velRef.current = { x: vx * scale, y: vy * scale };
+  }
+  useEffect(() => {
+    return () => {
+      // Cleanup all power-up timers on unmount
+      for (const k in powerupTimersRef.current) {
+        clearTimeout(powerupTimersRef.current[k]);
+      }
+      powerupTimersRef.current = {} as Record<string, number>;
+    };
+  }, []);
+
+  // Compute effective speed multiplier from active powerups and apply immediately
+  function recomputeSpeedMultiplier() {
+    const hasFire = activePowerupsRef.current.some((p) => p.type === 'fire');
+    const FIRE_MULTIPLIER = 1.2; // reduce fire boost to 1.2x
+    const targetMul = hasFire ? FIRE_MULTIPLIER : 1;
+    if (speedMultiplierRef.current !== targetMul) {
+      speedMultiplierRef.current = targetMul;
+      // Rescale current velocity to match new target magnitude
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const mag = Math.hypot(vx, vy) || 1;
+      const target = SPEED * targetMul;
+      const scale = target / mag;
+      velRef.current = { x: vx * scale, y: vy * scale };
+    }
+  }
+
+  // Generic, non-stacking power-up apply; refreshes duration if re-collected
+  function applyPowerup(type: string) {
+    const now = Date.now();
+    const expiresAt = now + DEFAULT_COOLDOWN_TIME_MS;
+    const prev = activePowerupsRef.current;
+    const idx = prev.findIndex((p) => p.type === type);
+    const next = [...prev];
+    if (idx >= 0) next[idx] = { type, expiresAt }; else next.push({ type, expiresAt });
+    activePowerupsRef.current = next;
+    setActivePowerups(next);
+    // manage timer
+    if (powerupTimersRef.current[type] != null) {
+      clearTimeout(powerupTimersRef.current[type]);
+      delete powerupTimersRef.current[type];
+    }
+    powerupTimersRef.current[type] = window.setTimeout(() => {
+      const cur = activePowerupsRef.current.filter((p) => p.type !== type);
+      activePowerupsRef.current = cur;
+      setActivePowerups(cur);
+      delete powerupTimersRef.current[type];
+      recomputeSpeedMultiplier();
+    }, DEFAULT_COOLDOWN_TIME_MS);
+    // apply immediately
+    recomputeSpeedMultiplier();
+  }
+
+  
   const physicsRaf = useRef<number | null>(null);
   const lastPhysics = useRef<number | null>(null);
   // respawn control: when ball falls off bottom we will respawn it in the center
@@ -724,9 +814,47 @@ export default function Home() {
   // fallback so respawn happens even if RAF is throttled/stalled.
   const respawnDeadlineRef = useRef<number | null>(null);
   const respawnTimerRef = useRef<number | null>(null);
+  // Emoji spawns via external hook
+  const { spawns, consumeSpawn } = useEmojiSpawner({
+    started: started && ENABLE_SPAWNER,
+    designW: DESIGN_W,
+    designH: DESIGN_H,
+    rectH: RECT_H,
+    respawnY: RESPAWN_Y_PX,
+    paddleBottomOffset: 96,
+    letterRectsRef,
+    ballRadiusRef,
+  });
+
+  // Collision check between ball and emoji spawns; consume on hit and apply effect
+  useEffect(() => {
+    if (!started || !ENABLE_SPAWNER) return;
+    let raf: number | null = null;
+    function step() {
+      const cx = ballXRef.current;
+      const cy = ballYRef.current;
+      const br = ballRadiusRef.current;
+      // Iterate over a snapshot to avoid mutation issues during consume
+      for (const s of spawns) {
+        const dx = cx - s.x;
+        const dy = cy - s.y;
+        const rr = br + s.size / 2;
+        if (dx * dx + dy * dy <= rr * rr) {
+          // Consume and apply corresponding effect
+          try { consumeSpawn(s.id); } catch {}
+          if (s.emoji === '🔥') applyPowerup('fire');
+        }
+      }
+      raf = requestAnimationFrame(step);
+    }
+    raf = requestAnimationFrame(step);
+    return () => { if (raf != null) cancelAnimationFrame(raf); };
+  }, [spawns, started]);
 
   // helper to start the blink + resume sequence (shared between RAF and timeout)
   function startRespawnBlink() {
+  // Clear any accrued powerups on respawn start
+  clearAllPowerups();
   // set position to configured spawn point (design-space px)
   // reset bottom-crossed marker so future crossings will re-log
   bottomCrossedRef.current = false;
@@ -768,9 +896,7 @@ export default function Home() {
             ballDomRef.current.style.left = "0";
             ballDomRef.current.style.top = "0";
           }
-          
-          let Theta = Math.PI + (Math.random() * Math.PI);
-          velRef.current = { x: SPEED * Math.cos(Theta), y: SPEED * -Math.sin(Theta) };
+          velRef.current = { x: 0, y: SPEED };
         }
     }, 180);
       console.log("[game] startRespawnBlink called", { time: Date.now() });
@@ -831,6 +957,121 @@ export default function Home() {
     };
   }, [scale]);
 
+  // Apply a short wobble animation to the given letter block by index.
+  function wobbleLetterByIndex(idx: number, direction: 'left' | 'right') {
+    if (idx < 0 || idx >= composerBtnRefs.current.length) {
+      console.warn('[wobble] invalid index', { idx, total: composerBtnRefs.current.length });
+      return;
+    }
+    const el = composerBtnRefs.current[idx];
+    if (!el) {
+      console.warn('[wobble] element not found for index', { idx });
+      return;
+    }
+  // Prefer JS-driven wobble so we can steer in direction of travel
+  // (we still keep CSS classes available for fallback if desired)
+  const cls = direction === 'left' ? 'wobble-left' : 'wobble-right';
+  console.debug('[wobble] applying class (js wobble will run too)', { idx, direction, cls });
+  el.classList.remove('wobble-left');
+  el.classList.remove('wobble-right');
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  (el as HTMLElement).offsetWidth;
+  // Optionally apply the class as a backup (commented to avoid transform conflicts)
+  // el.classList.add(cls);
+    // Also run a JS fallback micro-animation in case CSS animations are blocked
+    // or overridden by transforms elsewhere.
+    try {
+      // Compute wobble vector opposite to ball travel (recoil)
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const mag = Math.hypot(vx, vy) || 1;
+      const ux = -vx / mag; // recoil opposite to travel
+      const uy = -vy / mag;
+      const AMP = 18; // px amplitude for visibility (slightly higher)
+      const dx = Math.round(ux * AMP);
+      const dy = Math.round(uy * AMP);
+      const rotSign = Math.sign(dx || 1); // rotate in horizontal recoil direction
+      const n1 = () => { (el as HTMLElement).style.transform = `translate(${dx}px, ${dy}px) rotate(${8 * rotSign}deg)`; };
+      const n2 = () => { (el as HTMLElement).style.transform = `translate(${Math.round(-dx * 0.4)}px, ${Math.round(-dy * 0.4)}px) rotate(${-4 * rotSign}deg)`; };
+      const n3 = () => { (el as HTMLElement).style.transform = `translate(0, 0) rotate(0)`; };
+      (el as HTMLElement).style.transition = 'transform 140ms cubic-bezier(0.25, 0.8, 0.25, 1)';
+      console.debug('[wobble] js vector', { idx, vx, vy, dx, dy });
+      requestAnimationFrame(() => {
+        n1();
+        window.setTimeout(() => {
+          n2();
+          window.setTimeout(() => {
+            n3();
+            window.setTimeout(() => {
+              (el as HTMLElement).style.transition = '';
+              (el as HTMLElement).style.transform = '';
+            }, 120);
+          }, 120);
+        }, 120);
+      });
+    } catch (e) {
+      // ignore JS fallback errors
+    }
+    const cleanup = () => {
+      console.debug('[wobble] animation cleanup', { idx });
+      el.classList.remove('wobble-left');
+      el.classList.remove('wobble-right');
+      el.removeEventListener('animationend', cleanup);
+    };
+    // If CSS class was used, cleanup on animation end
+    if (el.classList.contains('wobble-left') || el.classList.contains('wobble-right')) {
+      el.addEventListener('animationend', cleanup);
+    }
+    // Fallback timeout in case animationend doesn't fire (e.g. tab not visible)
+    window.setTimeout(cleanup, 400);
+  }
+
+  // Pulse the struck block: flash white and fade back using a fixed overlay (2s fade)
+  function pulseLetterByIndex(idx: number) {
+    if (idx < 0 || idx >= composerBtnRefs.current.length) {
+      console.warn('[pulse] invalid index', { idx, total: composerBtnRefs.current.length });
+      return;
+    }
+    const wrapper = composerBtnRefs.current[idx];
+    if (!wrapper) {
+      console.warn('[pulse] wrapper not found for index', { idx });
+      return;
+    }
+    // Use a fixed overlay on document.body so React re-renders do not interfere
+    try {
+      const host = (wrapper.querySelector('button') as HTMLElement) || wrapper;
+      const rect = host.getBoundingClientRect();
+      const overlay = document.createElement('div');
+      overlay.setAttribute('aria-hidden', 'true');
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        left: `${Math.round(rect.left)}px`,
+        top: `${Math.round(rect.top)}px`,
+        width: `${Math.round(rect.width)}px`,
+        height: `${Math.round(rect.height)}px`,
+        borderRadius: '8px',
+        background: '#ffffff',
+        opacity: '1',
+        pointerEvents: 'none',
+        zIndex: '2147480000',
+        boxShadow: '0 0 0 6px rgba(255,255,255,0.22), 0 2px 10px rgba(0,0,0,0.3)',
+        transition: 'opacity 1000ms linear, box-shadow 1000ms linear',
+      } as CSSStyleDeclaration);
+      document.body.appendChild(overlay);
+      // Brief flash, then fade overlay out over 2s
+      window.setTimeout(() => {
+        overlay.style.opacity = '0';
+        overlay.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
+        window.setTimeout(() => {
+          try { document.body.removeChild(overlay); } catch (e) {}
+        }, 1100);
+      }, 140);
+      console.debug('[pulse] overlay applied (body, 2s)', { idx, rect: { left: rect.left, top: rect.top, w: rect.width, h: rect.height } });
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // collision helper: rectangle vs circle (design-space coords)
   function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number) {
     const closestX = Math.max(r.x, Math.min(cx, r.x + r.w));
@@ -861,37 +1102,43 @@ export default function Home() {
       debugDomRef,
       setSpawned,
       setBlinkVisible,
-      // when physics detects a local letter hit, append locally and broadcast
+      // when physics detects a local letter hit, append locally and broadcast,
+      // and wobble the impacted letter block.
       onLetterHit: (ch: string) => {
-  setBuffer((b) => {
-    const nb = b + ch;
-    try {
-      mp.sendBuffer?.(nb);
-
-      const conv = conversationRef.current;
-      const session = sessionRef.current;
-      // ✅ Only try to send when session+conversation are alive and we’ve joined
-      if (joinConfirmed && session && conv && typeof conv.send === "function") {
-        conv.send(ch).then(() => {
-          console.log("Message sent!");
-        }).catch((error: any) => {
-          // If it was destroyed mid-flight, just ignore
-          console.warn("TalkJS send skipped:", error?.message || error);
+        setBuffer((b) => {
+          const nb = b + ch;
+          try { mp.sendBuffer?.(nb); } catch (e) { /* ignore */ }
+          return nb;
         });
-      }
-    } catch (e) {
-      console.log(e);
-    }
-    return nb;
-  });
-},
+        // Wobble effect: determine which block was hit and which side to wobble towards
+        const idx = (typeof ch === 'string' && ch.length > 0) ? (ch.toUpperCase().charCodeAt(0) - 65) : -1;
+        if (idx >= 0 && idx < 26) {
+          // Decide wobble direction based on ball position relative to the block center
+          const rects = letterRectsRef.current;
+          const r = rects && rects[idx];
+          if (r) {
+            const centerX = r.x + r.w / 2;
+            const ballX = ballXRef.current;
+            // Keep direction only for logging continuity; pulse is direction-agnostic
+            const dir: 'left' | 'right' = ballX < centerX ? 'left' : 'right';
+            console.debug('[hit] letter', { ch, idx, rect: { x: r.x, y: r.y, w: r.w, h: r.h }, centerX, ballX, dir });
+            pulseLetterByIndex(idx);
+          } else {
+            // if rect not available, default to a right wobble
+            console.warn('[hit] rect not found for idx (pulse anyway)', { ch, idx });
+            pulseLetterByIndex(idx);
+          }
+        }
+      },
       DESIGN_W,
       DESIGN_H,
       RECT_W,
       RECT_H,
       BALL_RADIUS_REF: ballRadiusRef,
       SPEED,
+      SPEED_MULTIPLIER_REF: speedMultiplierRef,
       RESPAWN_DELAY,
+      onDespawn: clearAllPowerups,
       otherPaddlesRef,
       startRespawnBlink,
     });
@@ -1067,6 +1314,30 @@ export default function Home() {
     };
   }, []);
 
+  // Update the top-left debug overlay with current speed, paddle X, and powerups
+  useEffect(() => {
+    function step() {
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const speedMag = Math.hypot(vx, vy);
+      const px = rectXRef.current;
+      const list = activePowerupsRef.current.map((p) => p.type).join(', ');
+      const mul = (typeof speedMultiplierRef.current === 'number' ? speedMultiplierRef.current : 1);
+      const dir = directionRef.current;
+      const paddleBase = (DESIGN_W - RECT_W) / TRAVEL_TIME;
+      const paddleV = dir !== 0 ? Math.round(paddleBase * mul) : 0;
+      if (debugDomRef.current) {
+        debugDomRef.current.textContent = `conv: ${conversationId}  speed: ${Math.round(speedMag)}  posX: ${Math.round(px)}  mul: ${mul.toFixed(2)}  padV: ${paddleV}${list ? `  powerups: ${list}` : ''}`;
+      }
+      debugRafRef.current = requestAnimationFrame(step);
+    }
+    debugRafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (debugRafRef.current != null) cancelAnimationFrame(debugRafRef.current);
+      debugRafRef.current = null;
+    };
+  }, []);
+
   return (
     <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)", overflow: "hidden" }}>
     <main className="flex flex-col items-center justify-center gap-6" style={{ paddingBottom: 0 }}>
@@ -1093,6 +1364,35 @@ export default function Home() {
           <div className="mt-6" style={{ display: "flex", justifyContent: "center", width: "100%" }}>
             {/* wrapper: single centered container that holds the play area and an absolutely positioned control */}
             <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "visible", position: "relative" }}>
+              {/* debug overlay outside the play area, top-left above the A–Z array */}
+              <div
+                ref={debugDomRef}
+                aria-live="polite"
+                role="status"
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: -44,
+                  zIndex: 100,
+                  color: '#E5E7EB',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  background: 'rgba(0,0,0,0.5)',
+                  padding: '4px 6px',
+                  borderRadius: 6,
+                  pointerEvents: 'none',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+                  letterSpacing: 0.2,
+                  backdropFilter: 'blur(2px)',
+                  minWidth: 140,
+                  minHeight: 18,
+                  display: 'inline-flex',
+                  alignItems: 'center'
+                }}
+              >
+                {/* placeholder so it's visible even before first RAF update */}
+                <span style={{ opacity: 0.6 }}>…</span>
+              </div>
               <div style={{ position: 'absolute', right: 12, top: -44, zIndex: 90 }}>
                 <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
               </div>
@@ -1104,11 +1404,71 @@ export default function Home() {
                 <LetterComposer onAppend={handleAppend} btnRefs={composerBtnRefs} />
               </div>
 
+              {/* subtle instructions behind gameplay (muted, behind paddle/ball) */}
+              <div
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                  width: DESIGN_W,
+                  height: DESIGN_H,
+                  pointerEvents: "none",
+                  zIndex: 0,
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    textAlign: "center",
+                    color: "#6B7280", // muted gray
+                    opacity: 0.6,
+                    fontFamily: "monospace",
+                    fontSize: 18,
+                    userSelect: "none",
+                    letterSpacing: 0.3,
+                  }}
+                >
+                  ←/→ to move • Enter to send
+                </div>
+              </div>
+
+              {/* (moved) debug overlay now renders outside play area */}
+
               {/* render user avatar as a physics 'ball' (positioned absolutely in design-space) */}
               {
                 /* Ball will be positioned using ballX/ballY (center coords). */
               }
               <div style={{ position: "absolute", left: 0, top: 0, width: DESIGN_W, height: DESIGN_H, pointerEvents: "none" }}>
+                {/* transient emoji spawns (behind ball/paddles) */}
+                {ENABLE_SPAWNER && spawns.map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      position: 'absolute',
+                      left: Math.round(s.x - s.size / 2),
+                      top: Math.round(s.y - s.size / 2),
+                      width: s.size,
+                      height: s.size,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: s.size,
+                      lineHeight: 1,
+                      pointerEvents: 'none',
+                      zIndex: 5,
+                      filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.25))',
+                    }}
+                    aria-hidden
+                  >
+                    <span>{s.emoji}</span>
+                  </div>
+                ))}
+
                 {/* remote players' balls and paddles (updated from network) */}
                 {playersSnapshot.map((p) => {
                   if (!p || p.playerId === userId) return null;
@@ -1155,12 +1515,7 @@ export default function Home() {
                 >
                   <Avatar name={myUserName} src={myPhoto} size={ballRadius * 2} />
                 </div>
-                {/* small debug overlay text updated from RAF */}
-                <div
-                  ref={debugDomRef}
-                  style={{ position: "absolute", right: 12, top: 12, pointerEvents: "none", color: "#fff", fontFamily: "monospace", fontSize: 12, background: "rgba(0,0,0,0.45)", padding: "6px 8px", borderRadius: 6 }}
-                  aria-hidden
-                />
+                {/* debug overlay moved outside play area (top-left, same row as Change name) */}
               </div>
 
               {/* chat area fills remaining space */}
@@ -1172,16 +1527,41 @@ export default function Home() {
 
               {/* Movable rectangle and on-screen controls (inside design surface) */}
               <div style={{ position: "absolute", left: 0, top: 0, width: DESIGN_W, height: DESIGN_H, pointerEvents: "none" }}>
-                {/* the moving rectangle (pointerEvents auto so it can be interactive if desired) */}
-                <div style={{ position: "absolute", left: rectX, bottom: 96, width: RECT_W, height: RECT_H, background: (assignedColorRef.current != null ? colorForId(userId, assignedColorRef.current) : colorForId(userId)), borderRadius: 8, pointerEvents: "auto", display: "flex", alignItems: "center", justifyContent: "center", color: "#000", fontWeight: 700, fontFamily: "monospace" }}>
-                  {myUserName}
+                {/* Local paddle: render as an input-like buffer bar showing current buffer or a placeholder */}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: rectX,
+                    bottom: 96,
+                    width: RECT_W,
+                    height: RECT_H,
+                    background: "#0f1724",
+                    border: "1px solid rgba(255,255,255,0.06)",
+                    borderRadius: 8,
+                    pointerEvents: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-start",
+                    padding: "0 10px",
+                    color: "#e5e7eb",
+                    fontFamily: "monospace",
+                    fontSize: 14,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+                  }}
+                  aria-label="Chat input buffer"
+                >
+                  <span style={{ color: buffer ? "#e5e7eb" : "#9CA3AF", fontStyle: buffer ? "normal" as const : "italic" as const }}>
+                    {buffer || "Say something..."}
+                  </span>
                 </div>
 
                 {/* on-screen arrow buttons removed — keyboard only (ArrowLeft / ArrowRight) */}
               </div>
 
-              {/* inline buffer bar inside the fixed window so it scales */}
-              <BufferBar buffer={buffer} onEnter={handleEnter} onClear={handleClear} inline disabled={!joinConfirmed} />
+              {/* inline BufferBar removed: the paddle now displays the buffer */}
               </div>
             </div>
           </div>
