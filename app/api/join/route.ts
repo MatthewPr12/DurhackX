@@ -21,17 +21,20 @@ async function putTalkjs(path: string, body: any, appId: string, secret: string)
 export async function POST(req: Request) {
   const talkAppId = process.env.TALKJS_APP_ID;
   const talkSecret = process.env.TALKJS_SECRET;
-  const conversationId = process.env.TALKJS_CONVERSATION_ID || 'durhack-game';
+  // Allow client to specify the conversation id; fall back to server env/default
+  const defaultConversationId = process.env.TALKJS_CONVERSATION_ID || 'durhack-game';
 
   if (!talkAppId || !talkSecret) {
     return NextResponse.json({ ok: false, error: 'TALKJS_APP_ID or TALKJS_SECRET not set on server' }, { status: 500 });
   }
 
-  let body: Body = {};
+  let body: Body & { conversationId?: string } = {} as any;
   try { body = await req.json(); } catch (e) { /* ignore */ }
 
   const { playerId, name, photo } = body;
   if (!playerId) return NextResponse.json({ ok: false, error: 'playerId required' }, { status: 400 });
+
+  const conversationId = (body && body.conversationId) || defaultConversationId;
 
   // Create/update TalkJS user via Data API
   const userPayload = { id: playerId, name: name || playerId, photoUrl: photo || undefined } as any;

@@ -86,6 +86,13 @@ export default function Home() {
 
         const conversation = session.conversation(conversationId);
         conversation.createIfNotExists();
+        // Ensure the current user is actually a participant so that
+        // messages are visible to all subscribers across pages.
+        try {
+          conversation.participant(userId).createIfNotExists();
+        } catch (e) {
+          // ignore participant add errors
+        }
         conversation.participant(otherUserId).createIfNotExists();
         // keep a reference to the conversation so UI components can send messages
         conversationRef.current = conversation;

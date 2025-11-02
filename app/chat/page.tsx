@@ -90,8 +90,31 @@ export default function ChatPage() {
       // subscribe to messages
       try {
         const convAny: any = conv;
-        if (typeof convAny.subscribe === "function") {
-          convAny.subscribe((evt: any) => {
+        // Prefer the explicit message subscription API when available
+        if (typeof convAny.subscribeMessages === 'function') {
+          const unsub = convAny.subscribeMessages((ev: any) => {
+            // ev could be a single message or an array depending on SDK
+            const items = Array.isArray(ev) ? ev : [ev];
+            for (const itm of items) {
+              const msg = itm && (itm.message || itm); // normalize common shapes
+              // Filter out conversation-level updates (no text/body/content)
+              const looksLikeConvMeta = msg && typeof msg === 'object' && (
+                'createdAt' in msg || 'lastMessageAt' in msg
+              ) && !('text' in msg) && !('body' in msg) && !('content' in msg) && !('displayText' in msg);
+              if (looksLikeConvMeta) continue;
+
+              const text = msg && (msg.text || msg.body || msg.content || msg.displayText) || msg;
+              const sender = msg && (msg.sender && (msg.sender.id || msg.sender) || msg.from && (msg.from.id || msg.from) || msg.senderId) || 'unknown';
+              const id_ = (msg && msg.id) || String(Math.random()).slice(2);
+              setMessages((m) => [...m, { id: id_, text, from: sender, raw: msg }]);
+            }
+          });
+          // store unsubscribe on ref for cleanup
+          (convRef.current as any)._unsub = unsub;
+          console.log('[talk] chat subscribed via subscribeMessages');
+        } else if (typeof convAny.subscribe === "function") {
+          // Generic conversation subscription (may emit non-message updates)
+          const unsub = convAny.subscribe((evt: any) => {
             // Always log raw event for debugging realtime delivery
             console.debug('[talk] chat subscribe raw evt', evt);
             const msg = evt && (evt.message || evt);
@@ -106,6 +129,8 @@ export default function ChatPage() {
             const id_ = (msg && msg.id) || String(Math.random()).slice(2);
             setMessages((m) => [...m, { id: id_, text, from: sender, raw: msg }]);
           });
+          (convRef.current as any)._unsub = unsub;
+          console.log('[talk] chat subscribed via subscribe (fallback)');
         } else if (typeof convAny.on === "function") {
           const cb = (m: any) => {
             const looksLikeConvMeta = m && typeof m === 'object' && ('createdAt' in m || 'lastMessageAt' in m) && !('text' in m) && !('body' in m) && !('content' in m);
@@ -116,6 +141,8 @@ export default function ChatPage() {
             setMessages((mm) => [...mm, { id: id_, text, from: sender, raw: m }]);
           };
           convAny.on('message', cb);
+          (convRef.current as any)._unsub = () => convAny.off && convAny.off('message', cb);
+          console.log('[talk] chat subscribed via on(message) (legacy)');
         }
       } catch (e) {
         console.warn('subscribe failed', e);
@@ -184,7 +211,18 @@ export default function ChatPage() {
             {messages.map((m) => (
               <div key={m.id} style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 12, color: '#666' }}>{m.from}</div>
-                <div style={{ padding: '6px 8px', background: '#f3f4f6', borderRadius: 6, display: 'inline-block' }}>{typeof m.text === 'object' ? JSON.stringify(m.text) : m.text}</div>
+                <div
+                  style={{
+                    padding: '6px 10px',
+                    background: '#0d6efd', // Bootstrap primary blue
+                    color: '#ffffff',
+                    borderRadius: 8,
+                    display: 'inline-block',
+                    boxShadow: '0 2px 8px rgba(13, 110, 253, 0.25)'
+                  }}
+                >
+                  {typeof m.text === 'object' ? JSON.stringify(m.text) : m.text}
+                </div>
               </div>
             ))}
           </div>
