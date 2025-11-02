@@ -36,6 +36,8 @@ export default function Home() {
   useEffect(() => {
     if (!appId) return;
     if (typeof window === "undefined") return;
+    // don't initialize until the user explicitly started (or a saved session restored)
+    if (!started) return;
 
     // create a TalkJS session (uses the durhack host from the docs)
     if (!sessionRef.current) {
@@ -45,16 +47,48 @@ export default function Home() {
 
     const session = sessionRef.current;
 
-    // create demo users and a conversation if they don't exist
-    // include a photoUrl if provided for a better avatar experience
-  session.currentUser.createIfNotExists({ name: "Player", photoUrl: initialPhoto || undefined });
-    session.user(otherUserId).createIfNotExists({ name: "Nina" });
+    // Create user/participant server-side first (avoid USER_NOT_FOUND race).
+    // After the server confirms, perform local SDK createIfNotExists and
+    // conversation setup.
+    let cancelled = false;
+    (async function init() {
+      try {
+        // Use the userId as a safe fallback for name here to avoid
+        // referencing state that may be declared later in the file.
+        const payload = { playerId: userId, name: userId || "Player", photo: initialPhoto || undefined, conversationId };
+        const resp = await fetch("/api/join", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!cancelled && resp.ok) {
+          setJoinConfirmed(true);
+        } else {
+          // eslint-disable-next-line no-console
+          console.error("/api/join failed", resp.status, await resp.text());
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("/api/join error", e);
+      }
 
-    const conversation = session.conversation(conversationId);
-    conversation.createIfNotExists();
-    conversation.participant(otherUserId).createIfNotExists();
-    // keep a reference to the conversation so UI components can send messages
-    conversationRef.current = conversation;
+      // Only touch the TalkJS SDK after the server join attempt above.
+      try {
+  // Best-effort: if joinConfirmed was set we proceed; in case the
+  // server responded slowly we still try the safe SDK calls here.
+  session.currentUser.createIfNotExists({ name: userId || "Player", photoUrl: initialPhoto || undefined });
+        session.user(otherUserId).createIfNotExists({ name: "Nina" });
+
+        const conversation = session.conversation(conversationId);
+        conversation.createIfNotExists();
+        conversation.participant(otherUserId).createIfNotExists();
+        // keep a reference to the conversation so UI components can send messages
+        conversationRef.current = conversation;
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("TalkJS SDK init error", e);
+      }
+    })();
 
     return () => {
       // tidy up TalkJS session when component unmounts
@@ -65,7 +99,7 @@ export default function Home() {
       }
       sessionRef.current = null;
     };
-  }, [appId]);
+  }, [appId, userId, initialPhoto]);
 
   
 
@@ -106,6 +140,8 @@ export default function Home() {
   // opening another tab or reloading keeps the same identity during testing.
   const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
   const [started, setStarted] = useState<boolean>(false);
+  // Whether the server has confirmed the user/participant was created.
+  const [joinConfirmed, setJoinConfirmed] = useState<boolean>(false);
 
   // When the user starts a session (enters their name), ensure the TalkJS
   // currentUser reflects the chosen name and photo.
@@ -693,7 +729,8 @@ export default function Home() {
     }
     const myColor = pickColorIndex();
     assignedColorRef.current = myColor;
-    mp.connect(pid, myUserName, myPhoto, myColor);
+  // createMultiplayer.connect expects (id, name?, photo?) — pass only those
+  mp.connect(pid, myUserName, myPhoto);
     // receive updates
     const off = mp.onUpdate((u) => {
       if (!u || !u.playerId) return;
@@ -868,15 +905,16 @@ export default function Home() {
           <div className="mt-4 text-sm text-red-600">Set NEXT_PUBLIC_TALKJS_APP_ID in your environment to enable the chat.</div>
         ) : (
           <div className="mt-6" style={{ display: "flex", justifyContent: "center", width: "100%" }}>
-            {/* fixed design window scaled via CSS transform so all clients see the same layout */}
-            <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "hidden", position: "relative" }}>
-              <div ref={designInnerRef} style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
+            {/* wrapper: single centered container that holds the play area and an absolutely positioned control */}
+            <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "visible", position: "relative" }}>
+              <div style={{ position: 'absolute', right: 12, top: -44, zIndex: 90 }}>
+                <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
+              </div>
+              {/* fixed design window scaled via CSS transform so all clients see the same layout */}
+              <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "hidden", position: "relative" }}>
+                <div ref={designInnerRef} style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
               {/* composer at the top */}
               <div style={{ flex: "0 0 auto" }}>
-                {/* change-name control (top-right) */}
-                <div style={{ position: 'absolute', right: 12, top: 12, zIndex: 80 }}>
-                  <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
-                </div>
                 <LetterComposer onAppend={handleAppend} btnRefs={composerBtnRefs} />
               </div>
 
@@ -961,6 +999,7 @@ export default function Home() {
               </div>
             </div>
           </div>
+        </div>
         )}
       </main>
   {/* previously we rendered a fixed buffer bar; it's now rendered inline inside the aspect container */}

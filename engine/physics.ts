@@ -22,7 +22,6 @@ export function startPhysics(opts: {
   respawnDeadlineRef: React.MutableRefObject<number | null>;
   respawnTimerRef: React.MutableRefObject<number | null>;
   ballDomRef: React.MutableRefObject<HTMLElement | null>;
-  debugDomRef: React.MutableRefObject<HTMLElement | null>;
   setSpawned: (v: boolean) => void;
   setBlinkVisible: (v: boolean) => void;
   // callback used when a letter box is hit by the local ball
@@ -49,8 +48,7 @@ export function startPhysics(opts: {
     bottomCrossedRef,
     respawnDeadlineRef,
     respawnTimerRef,
-    ballDomRef,
-    debugDomRef,
+  ballDomRef,
   setSpawned,
   setBlinkVisible,
   onLetterHit,
@@ -229,12 +227,7 @@ export function startPhysics(opts: {
       ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
     }
 
-    // debug overlay
-    if (debugDomRef.current) {
-      try {
-        debugDomRef.current.textContent = `y=${Math.round(ballYRef.current)} nextY=${Math.round(nextY)} vy=${Math.round(vy)} respawning=${respawningRef.current}`;
-      } catch (e) {}
-    }
+    // debug overlay removed
 
     physicsRaf = requestAnimationFrame(step);
   }

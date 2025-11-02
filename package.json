@@ -3,11 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+  "predev": "node ./scripts/reset-conversation.js",
+  "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "ws-server": "node server/ws-server.js",
-  "sim-client": "node server/sim-client.js",
+    
+    "talkjs-webhook": "node server/talkjs-webhook.js",
+    "sim-client": "node server/sim-client.js",
     "lint": "eslint"
   },
   "dependencies": {
