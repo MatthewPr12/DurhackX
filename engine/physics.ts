@@ -9,12 +9,14 @@ export function rectCircleCollides(r: { x: number; y: number; w: number; h: numb
   const dx = cx - closestX;
   const dy = cy - closestY;
   const collided = dx * dx + dy * dy <= radius * radius;
+  const overlap = (radius - Math.sqrt(dx * dx + dy * dy))*1.1;
   if (!collided) {
     return {change : collided, newVX: 0, newVY: 0, cx: cx , cy: cy};
   } else {
     const alpha = Math.PI/2 - Math.atan2(ballVX, ballVY);
     const beta = alpha
-    return {change : collided, newVX: ballSPEED * Math.cos(2* Math.PI - beta), newVY: ballSPEED * Math.sin(2* Math.PI - beta), cx : (cx - closestX) * radius + cx, cy : (cy - closestY) * radius + cy};
+    console.log(ballSPEED)
+    return {change : collided, newVX: ballSPEED * Math.cos(2* Math.PI - beta), newVY: ballSPEED * Math.sin(2* Math.PI - beta), cx : overlap * dx + cx, cy : overlap * dy + cy};
   }
 }
 
@@ -106,14 +108,14 @@ export function startPhysics(opts: {
 
       // letter collisions when moving up
       for (const r of letterRectsRef.current) {
-        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED.current);
+        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED);
         if (colData.change) {
           console.log("Letter hit:", r.ch);
 
           velRef.current.x = colData.newVX;
           velRef.current.y = colData.newVY;
-          //ballXRef.current = colData.cx;
-          //ballYRef.current = colData.cy;
+          ballXRef.current = colData.cx;
+          ballYRef.current = colData.cy;
           handled = true;
 
           // append letter
@@ -160,7 +162,7 @@ export function startPhysics(opts: {
       }
 
       // paddle collision (downwards) — check local paddle and remote paddles
-      if (!handled && vy > 0) {
+      if (!handled) {
         // local paddle
         const paddleX = rectXRef.current;
         const localRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
@@ -168,9 +170,10 @@ export function startPhysics(opts: {
         if (colData.change) {
             velRef.current.x = colData.newVX;
             velRef.current.y = colData.newVY;
-            //ballXRef.current = colData.cx;
-            //ballYRef.current = colData.cy;
+            ballXRef.current = colData.cx;
+            ballYRef.current = colData.cy;
             handled = true;
+
         }
 
         // remote paddles
