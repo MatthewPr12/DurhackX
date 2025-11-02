@@ -1190,6 +1190,39 @@ export default function Home() {
                 <LetterComposer onAppend={handleAppend} btnRefs={composerBtnRefs} />
               </div>
 
+              {/* subtle instructions behind gameplay (muted, behind paddle/ball) */}
+              <div
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                  width: DESIGN_W,
+                  height: DESIGN_H,
+                  pointerEvents: "none",
+                  zIndex: 0,
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    textAlign: "center",
+                    color: "#6B7280", // muted gray
+                    opacity: 0.6,
+                    fontFamily: "monospace",
+                    fontSize: 18,
+                    userSelect: "none",
+                    letterSpacing: 0.3,
+                  }}
+                >
+                  ←/→ to move • Enter to send
+                </div>
+              </div>
+
               {/* render user avatar as a physics 'ball' (positioned absolutely in design-space) */}
               {
                 /* Ball will be positioned using ballX/ballY (center coords). */
