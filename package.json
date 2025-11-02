@@ -3,9 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+  "predev": "node ./scripts/reset-conversation.js",
+  "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    
+    "talkjs-webhook": "node server/talkjs-webhook.js",
+    "sim-client": "node server/sim-client.js",
     "lint": "eslint"
   },
   "dependencies": {
@@ -13,7 +17,8 @@
     "@talkjs/react-components": "^0.0.27",
     "next": "16.0.1",
     "react": "19.2.0",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.0",
+    "ws": "^8.13.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
