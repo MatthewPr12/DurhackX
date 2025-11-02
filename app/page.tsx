@@ -12,6 +12,10 @@ import { CONVERSATION_ID } from "../engine/constants";
 const ENABLE_SPAWNER = true;
 // Default power-up cooldown duration (ms)
 const DEFAULT_COOLDOWN_TIME_MS = 5000;
+// Disco music asset served via Next API route (reads the file from repo root)
+const DISCO_AUDIO_SRC = "/api/audio/disco";
+const DISCO_FADE_MS = 600; // < 1s fade in/out
+const DISCO_TARGET_GAIN = 0.6; // perceived volume for music (0..1)
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -722,6 +726,16 @@ export default function Home() {
   const velRef = useRef({ x: 0, y: SPEED });
   // Speed multiplier for temporary effects (e.g., fire boost)
   const speedMultiplierRef = useRef<number>(1);
+  // Disco audio element (looped while disco power-up is active)
+  const discoAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Web Audio fallback if the MP3 fails to load or play
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const discoNodeRef = useRef<{ osc: OscillatorNode; gain: GainNode } | null>(null);
+  // Flags
+  const discoAudioUnavailableRef = useRef<boolean>(false); // 404 or media error
+  const discoNeedsGestureRef = useRef<boolean>(false); // autoplay blocked
+  const discoGainRef = useRef<GainNode | null>(null);
+  const discoMediaNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const [activePowerups, setActivePowerups] = useState<Array<{ type: string; expiresAt: number }>>([]);
   const activePowerupsRef = useRef<Array<{ type: string; expiresAt: number }>>([]);
   useEffect(() => { activePowerupsRef.current = activePowerups; }, [activePowerups]);
@@ -737,6 +751,20 @@ export default function Home() {
     powerupTimersRef.current = {} as Record<string, number>;
     setActivePowerups([]);
     activePowerupsRef.current = [];
+    // Stop any ongoing disco audio
+    try {
+      const a = discoAudioRef.current;
+      if (a) { a.pause(); a.currentTime = 0; }
+    } catch {}
+    // Stop Web Audio fallback
+    try {
+      const n = discoNodeRef.current;
+      if (n) {
+        n.gain.gain.exponentialRampToValueAtTime(0.0001, (audioCtxRef.current || new (window as any).AudioContext()).currentTime + 0.05);
+        n.osc.stop((audioCtxRef.current || new (window as any).AudioContext()).currentTime + 0.06);
+      }
+    } catch {}
+    discoNodeRef.current = null;
     // Rescale velocity back to base immediately
     const vx = velRef.current.x;
     const vy = velRef.current.y;
@@ -773,9 +801,9 @@ export default function Home() {
   }
 
   // Generic, non-stacking power-up apply; refreshes duration if re-collected
-  function applyPowerup(type: string) {
+  function applyPowerup(type: string, durationMs?: number) {
     const now = Date.now();
-    const expiresAt = now + DEFAULT_COOLDOWN_TIME_MS;
+    const expiresAt = now + (durationMs ?? DEFAULT_COOLDOWN_TIME_MS);
     const prev = activePowerupsRef.current;
     const idx = prev.findIndex((p) => p.type === type);
     const next = [...prev];
@@ -793,10 +821,173 @@ export default function Home() {
       setActivePowerups(cur);
       delete powerupTimersRef.current[type];
       recomputeSpeedMultiplier();
-    }, DEFAULT_COOLDOWN_TIME_MS);
+    }, (durationMs ?? DEFAULT_COOLDOWN_TIME_MS));
     // apply immediately
     recomputeSpeedMultiplier();
   }
+
+  // Prepare the disco audio on mount (if file is present in public/audio)
+  useEffect(() => {
+    try {
+      const a = new Audio(DISCO_AUDIO_SRC);
+      a.loop = true;
+      a.preload = "auto";
+      // We'll control volume via WebAudio gain; keep element volume at 1
+      a.volume = 1;
+      discoAudioRef.current = a;
+      a.addEventListener('error', () => { discoAudioUnavailableRef.current = true; });
+    } catch (e) {
+      discoAudioRef.current = null;
+      discoAudioUnavailableRef.current = true;
+    }
+    // Prepare WebAudio graph for smooth fades
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const ctx = audioCtxRef.current;
+      if (discoAudioRef.current && ctx && !discoMediaNodeRef.current) {
+        const src = ctx.createMediaElementSource(discoAudioRef.current);
+        const gain = ctx.createGain();
+        gain.gain.value = 0.0001; // start muted (avoid pop)
+        src.connect(gain).connect(ctx.destination);
+        discoMediaNodeRef.current = src;
+        discoGainRef.current = gain;
+      }
+    } catch (e) {
+      // ignore WebAudio init failures; we'll rely on element volume
+      discoGainRef.current = null;
+      discoMediaNodeRef.current = null;
+    }
+    return () => {
+      try { const a = discoAudioRef.current; if (a) { a.pause(); a.src = ""; } } catch {}
+      discoAudioRef.current = null;
+      try {
+        if (discoMediaNodeRef.current) discoMediaNodeRef.current.disconnect();
+        if (discoGainRef.current) discoGainRef.current.disconnect();
+      } catch {}
+      discoMediaNodeRef.current = null;
+      discoGainRef.current = null;
+    };
+  }, []);
+
+  // Side-effect: play/pause disco music while the 'disco' power-up is active
+  useEffect(() => {
+    const hasDisco = activePowerups.some((p) => p.type === 'disco');
+    const a = discoAudioRef.current;
+    // Helper: start fallback tone using Web Audio
+    function startFallbackTone() {
+      try {
+        if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const ctx = audioCtxRef.current;
+        if (discoNodeRef.current) return; // already playing
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = 110; // low funky tone
+        gain.gain.value = 0.08; // subtle
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        discoNodeRef.current = { osc, gain };
+      } catch {}
+    }
+    function stopFallbackTone() {
+      try {
+        const n = discoNodeRef.current;
+        if (n && audioCtxRef.current) {
+          n.gain.gain.exponentialRampToValueAtTime(0.0001, audioCtxRef.current.currentTime + 0.05);
+          n.osc.stop(audioCtxRef.current.currentTime + 0.06);
+        }
+      } catch {}
+      discoNodeRef.current = null;
+    }
+    function fadeInDiscoAudio(ms = DISCO_FADE_MS) {
+      try {
+        const ctx = audioCtxRef.current;
+        const g = discoGainRef.current;
+        if (!ctx || !g) return;
+        const now = ctx.currentTime;
+        g.gain.cancelScheduledValues(now);
+        const start = Math.max(0.0001, g.gain.value);
+        g.gain.setValueAtTime(start, now);
+        g.gain.linearRampToValueAtTime(DISCO_TARGET_GAIN, now + ms / 1000);
+      } catch {}
+    }
+    function fadeOutDiscoAudio(ms = DISCO_FADE_MS) {
+      try {
+        const ctx = audioCtxRef.current;
+        const g = discoGainRef.current;
+        if (!ctx || !g) return;
+        const now = ctx.currentTime;
+        g.gain.cancelScheduledValues(now);
+        const start = Math.max(0.0001, g.gain.value);
+        g.gain.setValueAtTime(start, now);
+        g.gain.linearRampToValueAtTime(0.0001, now + ms / 1000);
+      } catch {}
+    }
+
+    let cleanupGesture: (() => void) | null = null;
+
+    async function ensureAudioAndPlay() {
+      // Preflight HEAD to detect missing file; skip if we already know it's unavailable
+      if (!discoAudioUnavailableRef.current) {
+        try {
+          const head = await fetch(DISCO_AUDIO_SRC, { method: 'HEAD' });
+          if (!head.ok) discoAudioUnavailableRef.current = true;
+        } catch {
+          // Network error: treat as unavailable for now
+          discoAudioUnavailableRef.current = true;
+        }
+      }
+      if (discoAudioUnavailableRef.current) {
+        startFallbackTone();
+        return;
+      }
+      if (!a) return;
+      try {
+        // Ensure context is resumed so fades are audible
+        try { if (audioCtxRef.current && audioCtxRef.current.state !== 'running') await audioCtxRef.current.resume(); } catch {}
+        await a.play();
+        // success, clear flags
+        discoNeedsGestureRef.current = false;
+        fadeInDiscoAudio();
+      } catch (err: any) {
+        // If autoplay blocked, set gesture flag and wait for user input
+        if (err && (err.name === 'NotAllowedError' || err.code === 0)) {
+          discoNeedsGestureRef.current = true;
+          const onGesture = () => {
+            if (!activePowerups.some((p) => p.type === 'disco')) return;
+            // resume context as well
+            const resume = async () => { try { if (audioCtxRef.current && audioCtxRef.current.state !== 'running') await audioCtxRef.current.resume(); } catch {} };
+            resume().then(() => a.play().then(() => { discoNeedsGestureRef.current = false; fadeInDiscoAudio(); }).catch(() => {}));
+          };
+          window.addEventListener('pointerdown', onGesture, { once: true });
+          window.addEventListener('keydown', onGesture, { once: true });
+          cleanupGesture = () => {
+            window.removeEventListener('pointerdown', onGesture);
+            window.removeEventListener('keydown', onGesture);
+          };
+        } else {
+          // Other failure: fall back to tone
+          discoAudioUnavailableRef.current = true;
+          startFallbackTone();
+        }
+      }
+    }
+
+    if (hasDisco) {
+      ensureAudioAndPlay();
+    } else {
+      // Smoothly fade out then pause/reset
+      fadeOutDiscoAudio();
+      setTimeout(() => {
+        try { if (a) { a.pause(); a.currentTime = 0; } } catch {}
+      }, DISCO_FADE_MS + 60);
+      stopFallbackTone();
+    }
+
+    return () => {
+      if (cleanupGesture) cleanupGesture();
+    };
+  }, [activePowerups]);
 
   
   const physicsRaf = useRef<number | null>(null);
@@ -843,7 +1034,8 @@ export default function Home() {
         if (dx * dx + dy * dy <= rr * rr) {
           // Consume and apply corresponding effect
           try { consumeSpawn(s.id); } catch {}
-          if (s.emoji === '🔥') applyPowerup('fire');
+          if (s.emoji === '🔥') applyPowerup('fire', (s as any).cooldownMs);
+          if (s.emoji === '🪩') applyPowerup('disco', (s as any).cooldownMs);
         }
       }
       raf = requestAnimationFrame(step);
@@ -1437,6 +1629,15 @@ export default function Home() {
                   ←/→ to move • Enter to send
                 </div>
               </div>
+
+              {/* Disco visual overlays */}
+              {activePowerups.some((p) => p.type === 'disco') && (
+                <>
+                  <div aria-hidden className="disco-dots" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                  <div aria-hidden className="disco-beams" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                  <div aria-hidden className="disco-overlay" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                </>
+              )}
 
               {/* (moved) debug overlay now renders outside play area */}
 
