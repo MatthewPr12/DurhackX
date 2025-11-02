@@ -141,8 +141,33 @@ export default function ChatPage() {
       }
       case "file": {
         const url = node.url || node.href || node.src;
-        const name = node.name || "Download file";
+        const name = node.name || node.filename || "Download file";
+        const subtype = node.subtype;
+        
         if (!url) return <span>{name}</span>;
+        
+        // If it's an image subtype or has an image extension, render as image
+        const isImage = subtype === "image" || /\.(jpg|jpeg|png|gif|webp|svg|avif)$/i.test(url) || /\.(jpg|jpeg|png|gif|webp|svg|avif)$/i.test(name);
+        
+        if (isImage) {
+          return (
+            <div style={{ margin: "6px 0" }}>
+              <img 
+                src={url} 
+                alt={name} 
+                style={{ 
+                  maxWidth: "100%", 
+                  maxHeight: 300, 
+                  borderRadius: 8, 
+                  display: "block",
+                  objectFit: "contain"
+                }} 
+              />
+            </div>
+          );
+        }
+        
+        // Otherwise render as download link
         return (
           <div style={{ margin: "6px 0" }}>
             <a href={url} target="_blank" rel="noreferrer noopener" style={{ color: "#ffd27f", textDecoration: "underline" }}>
