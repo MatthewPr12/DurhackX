@@ -28,7 +28,7 @@ export default function Home() {
     const pid = qs.get("player");
     if (pid) setUserId(pid);
   }, []);
-  const conversationId = "new_conversation";
+  const conversationId = "quiz_room_2";
 
   
 
@@ -43,6 +43,9 @@ export default function Home() {
 
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
+  // username chosen in start modal and session-start flag (used by TalkJS init)
+  const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
+  const [started, setStarted] = useState<boolean>(false);
 
   useEffect(() => {
     if (!appId) return;
@@ -50,10 +53,11 @@ export default function Home() {
     // don't initialize until the user explicitly started (or a saved session restored)
     if (!started) return;
 
-    // create a TalkJS session (uses the durhack host from the docs)
+    // create a TalkJS session (allow env host override like main branch)
     if (!sessionRef.current) {
-      // @ts-ignore - host is accepted by getTalkSession
-      sessionRef.current = getTalkSession({ host: "durhack.talkjs.com", appId, userId });
+      const host = process.env.NEXT_PUBLIC_TALKJS_HOST;
+      const opts: any = host ? { appId, userId, host } : { appId, userId };
+      sessionRef.current = getTalkSession(opts);
     }
 
     const session = sessionRef.current;
@@ -64,23 +68,21 @@ export default function Home() {
     let cancelled = false;
     (async function init() {
       try {
-        // Use the userId as a safe fallback for name here to avoid
-        // referencing state that may be declared later in the file.
-        const payload = { playerId: userId, name: userId || "Player", photo: initialPhoto || undefined, conversationId };
-        const resp = await fetch("/api/join", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+        // Use the userId as a safe fallback for name here
+        const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
+        const qs = new URLSearchParams({
+          user_id: userId || "player",
+          name: (/* prefer chosen name when available */ (typeof myUserName !== 'undefined' && myUserName) || userId || "Player"),
         });
-        if (!cancelled && resp.ok) {
-          setJoinConfirmed(true);
-        } else {
-          // eslint-disable-next-line no-console
-          console.error("/api/join failed", resp.status, await resp.text());
-        }
+        if (initialPhoto) qs.set("photo_url", initialPhoto);
+        const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
+          method: "POST",
+          headers: { Accept: "application/json" },
+        });
+        if (!cancelled && resp.ok) setJoinConfirmed(true);
+        else console.error("/talkjs/bootstrap failed", resp.status, await resp.text());
       } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("/api/join error", e);
+        console.error("/talkjs/bootstrap error", e);
       }
 
       // Only touch the TalkJS SDK after the server join attempt above.
@@ -125,9 +127,11 @@ export default function Home() {
       } catch (e) {
         // ignore cleanup errors
       }
+      // Prevent future sends and free references
+      conversationRef.current = null;
       sessionRef.current = null;
     };
-  }, [appId, userId, initialPhoto]);
+  }, [appId, started]);
 
   // Subscribe to TalkJS conversation messages and log them to the console.
   useEffect(() => {
@@ -225,9 +229,6 @@ export default function Home() {
 
   // user name and session state (start modal). Persist in sessionStorage so
   // opening another tab or reloading keeps the same identity during testing.
-  const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
-  const [started, setStarted] = useState<boolean>(false);
-  
 
   // When the user starts a session (enters their name), ensure the TalkJS
   // currentUser reflects the chosen name and photo.

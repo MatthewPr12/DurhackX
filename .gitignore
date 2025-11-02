@@ -182,6 +182,8 @@ celerybeat.pid
 .envrc
 .venv
 env/
+durhack_venv/
+server/quiz.db
 venv/
 ENV/
 env.bak/

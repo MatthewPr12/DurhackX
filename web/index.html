@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Brick IQ</title>
+    <style>
+      body { display:flex; gap:16px; font-family: system-ui, sans-serif; }
+      #game { border:1px solid #ddd; }
+      #right { width: 380px; display:flex; flex-direction: column; }
+      #question { padding:8px 0; font-weight:600; }
+    </style>
+    <script src="https://cdn.talkjs.com/talk.js"></script>
+  </head>
+  <body>
+    <canvas id="game" width="720" height="420"></canvas>
+    <div id="right">
+      <div id="question">Loading…</div>
+      <div id="chat" style="height:360px;border:1px solid #ddd"></div>
+    </div>
+
+<script>
+const API = "http://localhost:8001";
+const TALKJS_APP_ID = "<YOUR_TALKJS_APP_ID>";
+const CONVERSATION_ID = "quiz_room_1";
+
+// --- TalkJS Chatbox ---
+let talkSession, chatbox;
+Talk.ready.then(() => {
+  talkSession = new Talk.Session({ appId: TALKJS_APP_ID, me: new Talk.User({
+    id: "player-1", name: "Player One", email: "player1@example.com", photoUrl: "", role: "default"
+  })});
+
+  // One shared quiz conversation
+  const conv = talkSession.getOrCreateConversation(CONVERSATION_ID);
+  conv.setParticipant(talkSession.me);
+
+  chatbox = talkSession.createChatbox(conv);
+  chatbox.mount(document.getElementById("chat"));
+});
+// (Creating/mounting chatbox via JS SDK.) :contentReference[oaicite:6]{index=6}
+
+// --- Tiny brick-breaker stub with answer collisions ---
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let state = {
+  question: null,    // {id, text, answers[]}
+  bricks: [],        // [{x,y,w,h,label,index}]
+  ball: {x: 120, y: 220, vx: 3, vy: -3, r: 8},
+  paddle: {x: 260, y: 380, w: 140, h: 12},
+};
+
+async function fetchNext(afterId=null){
+  const url = new URL(API + "/questions/next");
+  if(afterId) url.searchParams.set("after_id", afterId);
+  const res = await fetch(url);
+  if(!res.ok) { document.getElementById('question').textContent = "No more questions 🎉"; return; }
+  const q = await res.json();
+  state.question = q;
+  layoutBricks(q.answers);
+  document.getElementById('question').textContent = q.text;
+}
+
+function layoutBricks(answers){
+  const cols = 2, gap = 8, bw = 300, bh = 30;
+  const startX = 40, startY = 40;
+  state.bricks = answers.map((ans, i) => {
+    const c = i % cols, r = Math.floor(i/cols);
+    return {x: startX + c*(bw+gap), y: startY + r*(bh+gap), w: bw, h: bh, label: ans, index: i};
+  });
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // paddle
+  ctx.fillStyle = "#333"; ctx.fillRect(state.paddle.x, state.paddle.y, state.paddle.w, state.paddle.h);
+  // bricks
+  ctx.fillStyle = "#4b9";
+  ctx.font = "14px system-ui";
+  state.bricks.forEach(b => {
+    ctx.fillStyle = "#4b9"; ctx.fillRect(b.x,b.y,b.w,b.h);
+    ctx.fillStyle = "#000"; ctx.fillText(b.label, b.x+8, b.y+20);
+  });
+  // ball
+  ctx.beginPath(); ctx.arc(state.ball.x, state.ball.y, state.ball.r, 0, Math.PI*2); ctx.fillStyle="#222"; ctx.fill();
+}
+
+function step(){
+  const b = state.ball;
+  b.x += b.vx; b.y += b.vy;
+  if(b.x < b.r || b.x > canvas.width - b.r) b.vx *= -1;
+  if(b.y < b.r) b.vy *= -1;
+  // paddle bounce
+  if (b.y + b.r >= state.paddle.y && b.x >= state.paddle.x && b.x <= state.paddle.x + state.paddle.w) {
+    b.vy = -Math.abs(b.vy);
+  }
+  // brick collisions
+  let hit = null;
+  state.bricks.forEach(br => {
+    if (!hit && b.x > br.x && b.x < br.x+br.w && b.y - b.r < br.y + br.h && b.y + b.r > br.y) {
+      hit = br;
+    }
+  });
+  if(hit) {
+    b.vy *= -1;
+    submitAnswer(hit.index); // send to backend
+  }
+  draw();
+  requestAnimationFrame(step);
+}
+
+async function submitAnswer(choiceIndex){
+  if(!state.question) return;
+  // optimistic: gray out bricks to avoid double hits
+  const payload = {
+    question_id: state.question.id,
+    choice_index: choiceIndex,
+    talk_conversation_id: CONVERSATION_ID
+  };
+  try {
+    const res = await fetch(API + "/answer", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    });
+    if(!res.ok) return;
+    const out = await res.json(); // {correct, next_question}
+    if(out.next_question){
+      state.ball.x = 120; state.ball.y = 220; // reset
+      await fetchNext(out.next_question.id - 1); // request by after_id
+    }
+  } catch(e) { console.error(e); }
+}
+
+document.addEventListener("mousemove", (ev) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  state.paddle.x = Math.min(Math.max(mx - state.paddle.w/2, 0), canvas.width - state.paddle.w);
+});
+
+// boot
+fetchNext(null).then(() => { draw(); step(); });
+</script>
+  </body>
+</html>
