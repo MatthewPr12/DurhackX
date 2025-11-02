@@ -1,4 +1,5 @@
 import type React from "react";
+import {useRef} from "react";
 
 export type LetterRect = { x: number; y: number; w: number; h: number; idx: number; ch: string };
 
@@ -213,7 +214,8 @@ export function startPhysics(opts: {
           }
           setBlinkVisible(true);
           respawningRef.current = false;
-          velRef.current = { x: 0, y: SPEED };
+          const R = (Math.random() * 0.5 + 0.25) * Math.PI * 2;
+          velRef.current = { x: SPEED * Math.sin(R), y: SPEED * Math.abs(Math.cos(R)) };
         }
       }, 180);
     }
