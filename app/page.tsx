@@ -13,8 +13,8 @@ export default function Home() {
   // demo user id. Use a stable server-safe default and hydrate a query-param
   // override on the client to avoid hydration mismatches between server and
   // client renders (don't call window or Math.random during render).
-  const [userId, setUserId] = useState<string>(() => process.env.NEXT_PUBLIC_USER_ID || "player_local");
-  const otherUserId = "opponent";
+  const [userId, setUserId] = useState<string>(() => process.env.NEXT_PUBLIC_USER_ID);
+  const otherUserId = "system-bot";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -22,7 +22,7 @@ export default function Home() {
     const pid = qs.get("player");
     if (pid) setUserId(pid);
   }, []);
-  const conversationId = "new_conversation";
+  const conversationId = "quiz_room_1";
 
   
 
@@ -37,74 +37,134 @@ export default function Home() {
 
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
-
+  const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
+  const [started, setStarted] = useState<boolean>(false);
   useEffect(() => {
-    if (!appId) return;
-    if (typeof window === "undefined") return;
-    // don't initialize until the user explicitly started (or a saved session restored)
-    if (!started) return;
+  (async function init() {
+      if (!appId) return;
+      if (typeof window === "undefined") return;
+      if (!started) return;
 
-    // create a TalkJS session (uses the durhack host from the docs)
-    if (!sessionRef.current) {
-      // @ts-ignore - host is accepted by getTalkSession
-      sessionRef.current = getTalkSession({ host: "durhack.talkjs.com", appId, userId });
-    }
+      if (!sessionRef.current) {
+        // @ts-ignore host is accepted
+        sessionRef.current = getTalkSession({ appId, userId });
+      }
+      const session = sessionRef.current;
 
-    const session = sessionRef.current;
-
-    // Create user/participant server-side first (avoid USER_NOT_FOUND race).
-    // After the server confirms, perform local SDK createIfNotExists and
-    // conversation setup.
-    let cancelled = false;
-    (async function init() {
-      try {
-        // Use the userId as a safe fallback for name here to avoid
-        // referencing state that may be declared later in the file.
-        const payload = { playerId: userId, name: userId || "Player", photo: initialPhoto || undefined, conversationId };
-        const resp = await fetch("/api/join", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!cancelled && resp.ok) {
-          setJoinConfirmed(true);
-        } else {
-          // eslint-disable-next-line no-console
-          console.error("/api/join failed", resp.status, await resp.text());
+      let cancelled = false;
+        try {
+          const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
+          const qs = new URLSearchParams({
+            user_id: userId || "player",
+            name: (myUserName || userId || "Player"),
+          });
+          if (initialPhoto) qs.set("photo_url", initialPhoto);
+          const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+          });
+          if (!cancelled && resp.ok) setJoinConfirmed(true);
+          else console.error("/talkjs/bootstrap failed", resp.status, await resp.text());
+        } catch (e) {
+          console.error("/talkjs/bootstrap error", e);
         }
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("/api/join error", e);
-      }
 
-      // Only touch the TalkJS SDK after the server join attempt above.
-      try {
-  // Best-effort: if joinConfirmed was set we proceed; in case the
-  // server responded slowly we still try the safe SDK calls here.
-  session.currentUser.createIfNotExists({ name: userId || "Player", photoUrl: initialPhoto || undefined });
-        session.user(otherUserId).createIfNotExists({ name: "Nina" });
+        try {
+          session.currentUser.createIfNotExists({
+            name: myUserName || "Player",
+            photoUrl: initialPhoto || undefined
+          });
+          session.user(otherUserId).createIfNotExists({ name: "Nina" });
 
-        const conversation = session.conversation(conversationId);
-        conversation.createIfNotExists();
-        conversation.participant(otherUserId).createIfNotExists();
-        // keep a reference to the conversation so UI components can send messages
-        conversationRef.current = conversation;
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("TalkJS SDK init error", e);
-      }
-    })();
+          const conversation = session.conversation(conversationId);
+          conversation.createIfNotExists();
+          conversation.participant(otherUserId).createIfNotExists();
+          conversationRef.current = conversation;  // ✅ set ref only after ready
+        } catch (e) {
+          console.error("TalkJS SDK init error", e);
+        }
+      })();
 
-    return () => {
-      // tidy up TalkJS session when component unmounts
-      try {
-        session.destroy && session.destroy();
-      } catch (e) {
-        // ignore cleanup errors
-      }
-      sessionRef.current = null;
-    };
-  }, [appId, userId, initialPhoto]);
+      return () => {
+        // When this effect cleans up (route change/unmount), mark refs as unusable
+        try { session.destroy && session.destroy(); } catch {}
+        conversationRef.current = null;          // ✅ prevent future sends
+        sessionRef.current = null;
+      };
+    }, [appId, started]);
+
+  // useEffect(() => {
+  //   if (!appId) return;
+  //   if (typeof window === "undefined") return;
+  //   // don't initialize until the user explicitly started (or a saved session restored)
+  //   if (!started) return;
+  //
+  //   // create a TalkJS session (uses the durhack host from the docs)
+  //   if (!sessionRef.current) {
+  //     // @ts-ignore - host is accepted by getTalkSession
+  //     sessionRef.current = getTalkSession({ appId, userId });
+  //   }
+  //
+  //   const session = sessionRef.current;
+  //
+  //   // Create user/participant server-side first (avoid USER_NOT_FOUND race).
+  //   // After the server confirms, perform local SDK createIfNotExists and
+  //   // conversation setup.
+  //   let cancelled = false;
+  //   (async function init() {
+  //     try {
+  //       // Use the userId as a safe fallback for name here to avoid
+  //       // referencing state that may be declared later in the file.
+  //       const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
+  //       const qs = new URLSearchParams({
+  //         user_id: userId || "player",
+  //         name: (myUserName || userId || "Player"),
+  //       });
+  //       if (initialPhoto) qs.set("photo_url", initialPhoto); // optional
+  //
+  //       const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
+  //         method: "POST",
+  //         headers: { "Accept": "application/json" },
+  //       });
+  //       if (!cancelled && resp.ok) {
+  //         setJoinConfirmed(true);
+  //       } else {
+  //         // eslint-disable-next-line no-console
+  //         console.error("/api/join failed", resp.status, await resp.text());
+  //       }
+  //     } catch (e) {
+  //       // eslint-disable-next-line no-console
+  //       console.error("/api/join error", e);
+  //     }
+  //
+  //     // Only touch the TalkJS SDK after the server join attempt above.
+  //     try {
+  // // Best-effort: if joinConfirmed was set we proceed; in case the
+  // // server responded slowly we still try the safe SDK calls here.
+  // session.currentUser.createIfNotExists({ name: myUserName || "Player", photoUrl: initialPhoto || undefined });
+  //       session.user(otherUserId).createIfNotExists({ name: "Nina" });
+  //
+  //       const conversation = session.conversation(conversationId);
+  //       conversation.createIfNotExists();
+  //       conversation.participant(otherUserId).createIfNotExists();
+  //       // keep a reference to the conversation so UI components can send messages
+  //       conversationRef.current = conversation;
+  //     } catch (e) {
+  //       // eslint-disable-next-line no-console
+  //       console.error("TalkJS SDK init error", e);
+  //     }
+  //   })();
+  //
+  //   return () => {
+  //     // tidy up TalkJS session when component unmounts
+  //     try {
+  //       session.destroy && session.destroy();
+  //     } catch (e) {
+  //       // ignore cleanup errors
+  //     }
+  //     sessionRef.current = null;
+  //   };
+  // }, [appId, userId, initialPhoto]);
 
   // Subscribe to TalkJS conversation messages and log them to the console.
   useEffect(() => {
@@ -202,8 +262,7 @@ export default function Home() {
 
   // user name and session state (start modal). Persist in sessionStorage so
   // opening another tab or reloading keeps the same identity during testing.
-  const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
-  const [started, setStarted] = useState<boolean>(false);
+
   
 
   // When the user starts a session (enters their name), ensure the TalkJS
@@ -253,22 +312,16 @@ export default function Home() {
   // Allow the user to change their display name during a session. This
   // disconnects the multiplayer client, clears the saved session, and
   // re-opens the Start modal so the user can re-enter their name.
-  function handleChangeName() {
-    try {
-      mp.disconnect();
-    } catch (e) {
-      // ignore
+    function handleChangeName() {
+      try { mp.disconnect(); } catch {}
+      try { window.sessionStorage.removeItem('durhack_session'); } catch {}
+      setStarted(false);
+      setMyUserName("");
+      setUserId("");
+      setMyPhoto(undefined);
+      conversationRef.current = null;   // ✅
     }
-    try {
-      if (typeof window !== 'undefined') window.sessionStorage.removeItem('durhack_session');
-    } catch (e) {
-      // ignore
-    }
-    setStarted(false);
-    setMyUserName("");
-    setUserId("");
-    setMyPhoto(undefined);
-  }
+
 
   // Memoize theme to avoid unnecessary re-allocations. We export a theme
   // object from `lib/talkTheme.tsx` — pass that into TalkJS components when
@@ -806,25 +859,28 @@ export default function Home() {
       setBlinkVisible,
       // when physics detects a local letter hit, append locally and broadcast
       onLetterHit: (ch: string) => {
-        setBuffer((b) => {
-          const nb = b + ch;
-          try {
-            mp.sendBuffer?.(nb);
-            // Create a message
+  setBuffer((b) => {
+    const nb = b + ch;
+    try {
+      mp.sendBuffer?.(nb);
 
-            // Send the message
-            conversationRef.current.send(ch).then(function() {
-              console.log("Message sent!");
-            }).catch(function(error) {
-              console.error("Error sending message: ", error);
-            });
-
-          } catch (e) { /* ignore */
-            console.log(e)
-          }
-          return nb;
+      const conv = conversationRef.current;
+      const session = sessionRef.current;
+      // ✅ Only try to send when session+conversation are alive and we’ve joined
+      if (joinConfirmed && session && conv && typeof conv.send === "function") {
+        conv.send(ch).then(() => {
+          console.log("Message sent!");
+        }).catch((error: any) => {
+          // If it was destroyed mid-flight, just ignore
+          console.warn("TalkJS send skipped:", error?.message || error);
         });
-      },
+      }
+    } catch (e) {
+      console.log(e);
+    }
+    return nb;
+  });
+},
       DESIGN_W,
       DESIGN_H,
       RECT_W,
