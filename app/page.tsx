@@ -16,13 +16,14 @@ export default function Home() {
   const [userId, setUserId] = useState<string>(() => process.env.NEXT_PUBLIC_USER_ID);
   const otherUserId = "system-bot";
 
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const qs = new URLSearchParams(window.location.search);
     const pid = qs.get("player");
     if (pid) setUserId(pid);
   }, []);
-  const conversationId = "quiz_room_1";
+  const conversationId = "quiz_room_2";
 
   
 
@@ -46,9 +47,12 @@ export default function Home() {
       if (!started) return;
 
       if (!sessionRef.current) {
-        // @ts-ignore host is accepted
-        sessionRef.current = getTalkSession({ appId, userId });
-      }
+          const host = process.env.NEXT_PUBLIC_TALKJS_HOST; // e.g. "durhack.talkjs.com"
+          // @ts-ignore host is accepted by TalkJS
+          sessionRef.current = host
+            ? getTalkSession({ appId, userId, host })
+            : getTalkSession({ appId, userId });
+        }
       const session = sessionRef.current;
 
       let cancelled = false;
