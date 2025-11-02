@@ -89,6 +89,16 @@ export default function Home() {
         conversation.participant(otherUserId).createIfNotExists();
         // keep a reference to the conversation so UI components can send messages
         conversationRef.current = conversation;
+        try {
+          // Log the conversation id used locally so we can verify both pages
+          // are joining the same TalkJS conversation.
+          // conversationId is the canonical id we pass; conversation.id may
+          // be present depending on SDK shape.
+          // eslint-disable-next-line no-console
+          console.log('[talk] main page conversation id', { conversationId, convId: (conversation ? (conversation as any).id : undefined) });
+        } catch (e) {
+          // ignore logging errors
+        }
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("TalkJS SDK init error", e);

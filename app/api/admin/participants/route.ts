@@ -24,7 +24,14 @@ export async function GET(req: Request) {
   }
 
   try {
-    const url = `https://api.talkjs.com/v1/${encodeURIComponent(talkAppId)}/conversations/${encodeURIComponent(conversationId)}/participants`;
+    // Allow overriding conversationId via query param for diagnostics
+    let convId = conversationId;
+    try {
+      const u = new URL(req.url);
+      const q = u.searchParams.get('conversationId');
+      if (q) convId = q;
+    } catch (e) {}
+    const url = `https://api.talkjs.com/v1/${encodeURIComponent(talkAppId)}/conversations/${encodeURIComponent(convId)}/participants`;
     const res = await talkFetch(url, { headers: { 'Authorization': 'Basic ' + Buffer.from(`${talkSecret}:`).toString('base64') } });
     const txt = await res.text();
     let json: any = null;

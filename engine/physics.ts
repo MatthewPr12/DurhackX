@@ -3,19 +3,12 @@ import {useRef} from "react";
 
 export type LetterRect = { x: number; y: number; w: number; h: number; idx: number; ch: string };
 
-export function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number, ballVX?: number, ballVY?: number, boxVX?: number, boxVY?: number, ballSPEED) {
+export function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number) {
   const closestX = Math.max(r.x, Math.min(cx, r.x + r.w));
   const closestY = Math.max(r.y, Math.min(cy, r.y + r.h));
   const dx = cx - closestX;
   const dy = cy - closestY;
-  const collided = dx * dx + dy * dy <= radius * radius;
-  if (!collided) {
-    return {change : collided, newVX: 0, newVY: 0, cx: cx , cy: cy};
-  } else {
-    const alpha = Math.PI/2 - Math.atan2(ballVX, ballVY);
-    const beta = alpha
-    return {change : collided, newVX: ballSPEED * Math.cos(2* Math.PI - beta), newVY: ballSPEED * Math.sin(2* Math.PI - beta), cx : (cx - closestX) * radius + cx, cy : (cy - closestY) * radius + cy};
-  }
+  return dx * dx + dy * dy <= radius * radius;
 }
 
 export function startPhysics(opts: {
@@ -30,7 +23,6 @@ export function startPhysics(opts: {
   respawnDeadlineRef: React.MutableRefObject<number | null>;
   respawnTimerRef: React.MutableRefObject<number | null>;
   ballDomRef: React.MutableRefObject<HTMLElement | null>;
-  debugDomRef: React.MutableRefObject<HTMLElement | null>;
   setSpawned: (v: boolean) => void;
   setBlinkVisible: (v: boolean) => void;
   // callback used when a letter box is hit by the local ball
@@ -57,8 +49,7 @@ export function startPhysics(opts: {
     bottomCrossedRef,
     respawnDeadlineRef,
     respawnTimerRef,
-    ballDomRef,
-    debugDomRef,
+  ballDomRef,
   setSpawned,
   setBlinkVisible,
   onLetterHit,
@@ -105,28 +96,23 @@ export function startPhysics(opts: {
       let handled = false;
 
       // letter collisions when moving up
-      for (const r of letterRectsRef.current) {
-        const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED.current).change;
-        if (colData.change) {
-          velRef.current.x = colData.newVX;
-          velRef.current.y = colData.newVY;
-          //ballXRef.current = colData.cx;
-          //ballYRef.current = colData.cy;
-          debugDomRef.current.textContent = "COLLSISION"
-          handled = true;
-
-          // append letter
-          try {
-            const letter = r.ch || String.fromCharCode(65 + r.idx);
-            if (onLetterHit) onLetterHit(letter);
-          } catch (e) {
-            // ignore
+      if (vy < 0 && letterRectsRef.current.length > 0) {
+        for (const r of letterRectsRef.current) {
+          if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
+            velRef.current.y = Math.abs(vy);
+            ballYRef.current = r.y + r.h + BALL_RADIUS;
+            // append letter
+            try {
+              const letter = r.ch || String.fromCharCode(65 + r.idx);
+              if (onLetterHit) onLetterHit(letter);
+            } catch (e) {
+              // ignore
+            }
+            handled = true;
+            break;
           }
-          handled = true;
-          break;
         }
       }
-
 
       // top boundary bounce
       if (!handled && nextY - BALL_RADIUS <= 0) {
@@ -163,21 +149,17 @@ export function startPhysics(opts: {
         // local paddle
         const paddleX = rectXRef.current;
         const localRect = { x: paddleX, y: paddleTop, w: RECT_W, h: RECT_H };
-        const colData = rectCircleCollides(localRect, ballXRef.current, ballYRef.current, BALL_RADIUS, vx, vy, 0, 0, SPEED)
-        if (colData.change) {
-            velRef.current.x = colData.newVX;
-            velRef.current.y = colData.newVY;
-            //ballXRef.current = colData.cx;
-            //ballYRef.current = colData.cy;
-            debugDomRef.current.textContent = "COLLSISION"
-            handled = true;
+        if (rectCircleCollides(localRect, bx, nextY, BALL_RADIUS)) {
+          velRef.current.y = -Math.abs(vy);
+          ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
+          handled = true;
         }
 
         // remote paddles
         if (!handled && opts.otherPaddlesRef && opts.otherPaddlesRef.current.length > 0) {
           for (const p of opts.otherPaddlesRef.current) {
             const r = { x: p.x, y: paddleTop, w: p.w || RECT_W, h: RECT_H };
-            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED).change) {
+            if (rectCircleCollides(r, bx, nextY, BALL_RADIUS)) {
               velRef.current.y = -Math.abs(vy);
               ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
               handled = true;
@@ -232,11 +214,8 @@ export function startPhysics(opts: {
           }
           setBlinkVisible(true);
           respawningRef.current = false;
-          const Theta = Math.PI + (Math.random() * Math.PI);
-          velRef.current.x = SPEED * Math.cos(Theta);
-          const vx = velRef.current.x;
-          velRef.current.y =  SPEED * -Math.sin(Theta);
-          const vy = velRef.current.y;
+          const R = (Math.random() * 0.5 + 0.25) * Math.PI * 2;
+          velRef.current = { x: SPEED * Math.sin(R), y: SPEED * Math.abs(Math.cos(R)) };
         }
       }, 180);
     }
@@ -250,12 +229,7 @@ export function startPhysics(opts: {
       ballDomRef.current.style.transform = `translate3d(${sx}px, ${sy}px, 0)`;
     }
 
-    // debug overlay
-    if (debugDomRef.current) {
-      try {
-        //debugDomRef.current.textContent = `y=${Math.round(ballYRef.current)} nextY=${Math.round(nextY)} vy=${Math.round(vy)} respawning=${respawningRef.current}`;
-      } catch (e) {}
-    }
+    // debug overlay removed
 
     physicsRaf = requestAnimationFrame(step);
   }
