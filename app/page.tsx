@@ -650,7 +650,7 @@ export default function Home() {
   const letterRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; idx: number; ch: string }>>([]);
 
   // velocity ref (vx, vy) in design-space px/s. Start moving downward.
-  const velRef = useRef({ x: 0, y: SPEED });
+  const velRef = useRef({ x: 0, y: -SPEED });
   const physicsRaf = useRef<number | null>(null);
   const lastPhysics = useRef<number | null>(null);
   // respawn control: when ball falls off bottom we will respawn it in the center
@@ -711,7 +711,9 @@ export default function Home() {
             ballDomRef.current.style.left = "0";
             ballDomRef.current.style.top = "0";
           }
-          velRef.current = { x: 0, y: SPEED };
+          
+          let Theta = Math.PI + (Math.random() * Math.PI);
+          velRef.current = { x: SPEED * Math.cos(Theta), y: SPEED * -Math.sin(Theta) };
         }
     }, 180);
       console.log("[game] startRespawnBlink called", { time: Date.now() });

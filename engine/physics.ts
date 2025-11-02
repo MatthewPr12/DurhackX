@@ -15,7 +15,6 @@ export function rectCircleCollides(r: { x: number; y: number; w: number; h: numb
   } else {
     const alpha = Math.PI/2 - Math.atan2(ballVX, ballVY);
     const beta = alpha
-    console.log(ballSPEED)
     return {change : collided, newVX: ballSPEED * Math.cos(2* Math.PI - beta), newVY: ballSPEED * Math.sin(2* Math.PI - beta), cx : overlap * dx + cx, cy : overlap * dy + cy};
   }
 }
@@ -110,8 +109,6 @@ export function startPhysics(opts: {
       for (const r of letterRectsRef.current) {
         const colData = rectCircleCollides(r, bx, nextY, BALL_RADIUS, vx, vy, 0, 0, SPEED);
         if (colData.change) {
-          console.log("Letter hit:", r.ch);
-
           velRef.current.x = colData.newVX;
           velRef.current.y = colData.newVY;
           ballXRef.current = colData.cx;
@@ -235,7 +232,7 @@ export function startPhysics(opts: {
           }
           setBlinkVisible(true);
           respawningRef.current = false;
-          const Theta = Math.PI + (Math.random() * Math.PI);
+          let Theta = Math.PI + (Math.random() * Math.PI);
           velRef.current.x = SPEED * Math.cos(Theta);
           const vx = velRef.current.x;
           velRef.current.y =  SPEED * -Math.sin(Theta);
