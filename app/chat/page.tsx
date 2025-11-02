@@ -15,6 +15,9 @@ export default function ChatPage() {
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState<Array<any>>([]);
   const [buffer, setBuffer] = useState("");
+  // Track seen message IDs to avoid duplicate renders when subscriptions
+  // emit an initial batch and then realtime updates (or StrictMode double-run).
+  const seenIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     return () => {
@@ -49,7 +52,7 @@ export default function ChatPage() {
         console.warn("createIfNotExists failed", e);
       }
 
-      const conv = s.conversation(conversationId);
+  const conv = s.conversation(conversationId);
       conv.createIfNotExists();
       // ensure this user is a participant so realtime events are delivered
       try {
@@ -87,12 +90,17 @@ export default function ChatPage() {
         // ignore
       }
 
+      // Reset dedupe set at (re)start to keep only current session's seen IDs
+      seenIdsRef.current = new Set();
+
       // subscribe to messages
       try {
         const convAny: any = conv;
-        // Prefer the explicit message subscription API when available
+        const unsubs: Array<() => void> = [];
+        // Prefer the explicit message subscription API when available (often emits initial history)
         if (typeof convAny.subscribeMessages === 'function') {
           const unsub = convAny.subscribeMessages((ev: any) => {
+            console.debug('[talk] subscribeMessages event', ev);
             // ev could be a single message or an array depending on SDK
             const items = Array.isArray(ev) ? ev : [ev];
             for (const itm of items) {
@@ -106,15 +114,24 @@ export default function ChatPage() {
               const text = msg && (msg.text || msg.body || msg.content || msg.displayText) || msg;
               const sender = msg && (msg.sender && (msg.sender.id || msg.sender) || msg.from && (msg.from.id || msg.from) || msg.senderId) || 'unknown';
               const id_ = (msg && msg.id) || String(Math.random()).slice(2);
-              setMessages((m) => [...m, { id: id_, text, from: sender, raw: msg }]);
+
+              // Dedupe by message id
+              if (id_ && seenIdsRef.current.has(id_)) continue;
+              if (id_) seenIdsRef.current.add(id_);
+
+              setMessages((m) => {
+                // Extra safety: ensure no duplicate id exists in current state
+                if (m.some((mm) => mm && mm.id === id_)) return m;
+                return [...m, { id: id_, text, from: sender, raw: msg }];
+              });
             }
           });
-          // store unsubscribe on ref for cleanup
-          (convRef.current as any)._unsub = unsub;
+          unsubs.push(unsub);
           console.log('[talk] chat subscribed via subscribeMessages');
-        } else if (typeof convAny.subscribe === "function") {
-          // Generic conversation subscription (may emit non-message updates)
-          const unsub = convAny.subscribe((evt: any) => {
+        }
+        // Also attach generic subscribe if available (some SDKs emit realtime here)
+        if (typeof convAny.subscribe === "function") {
+          const unsub2 = convAny.subscribe((evt: any) => {
             // Always log raw event for debugging realtime delivery
             console.debug('[talk] chat subscribe raw evt', evt);
             const msg = evt && (evt.message || evt);
@@ -127,23 +144,41 @@ export default function ChatPage() {
             const text = msg && (msg.text || msg.body || msg.content || msg.displayText) || msg;
             const sender = msg && (msg.sender && (msg.sender.id || msg.sender) || msg.from && (msg.from.id || msg.from) || msg.senderId) || 'unknown';
             const id_ = (msg && msg.id) || String(Math.random()).slice(2);
-            setMessages((m) => [...m, { id: id_, text, from: sender, raw: msg }]);
+
+            if (id_ && seenIdsRef.current.has(id_)) return;
+            if (id_) seenIdsRef.current.add(id_);
+
+            setMessages((m) => {
+              if (m.some((mm) => mm && mm.id === id_)) return m;
+              return [...m, { id: id_, text, from: sender, raw: msg }];
+            });
           });
-          (convRef.current as any)._unsub = unsub;
-          console.log('[talk] chat subscribed via subscribe (fallback)');
-        } else if (typeof convAny.on === "function") {
+          unsubs.push(unsub2);
+          console.log('[talk] chat subscribed via subscribe');
+        }
+        // Finally, attach legacy event emitter if available (often emits realtime 'message' only)
+        if (typeof convAny.on === "function") {
           const cb = (m: any) => {
             const looksLikeConvMeta = m && typeof m === 'object' && ('createdAt' in m || 'lastMessageAt' in m) && !('text' in m) && !('body' in m) && !('content' in m);
             if (looksLikeConvMeta) return;
             const text = m && (m.text || m.body || m.content || m.displayText) || m;
             const sender = m && (m.sender && (m.sender.id || m.sender) || m.from && (m.from.id || m.from) || m.senderId) || 'unknown';
             const id_ = (m && m.id) || String(Math.random()).slice(2);
-            setMessages((mm) => [...mm, { id: id_, text, from: sender, raw: m }]);
+
+            if (id_ && seenIdsRef.current.has(id_)) return;
+            if (id_) seenIdsRef.current.add(id_);
+
+            setMessages((mm) => {
+              if (mm.some((mmm) => mmm && mmm.id === id_)) return mm;
+              return [...mm, { id: id_, text, from: sender, raw: m }];
+            });
           };
           convAny.on('message', cb);
-          (convRef.current as any)._unsub = () => convAny.off && convAny.off('message', cb);
-          console.log('[talk] chat subscribed via on(message) (legacy)');
+          unsubs.push(() => convAny.off && convAny.off('message', cb));
+          console.log('[talk] chat subscribed via on(message)');
         }
+        // store a combined unsubscribe for cleanup if needed later
+        (convRef.current as any)._unsub = () => { try { unsubs.forEach((u) => typeof u === 'function' && u()); } catch (e) {} };
       } catch (e) {
         console.warn('subscribe failed', e);
       }
