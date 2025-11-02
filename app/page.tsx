@@ -19,8 +19,10 @@ export default function Home() {
   // demo user id. Use a stable server-safe default and hydrate a query-param
   // override on the client to avoid hydration mismatches between server and
   // client renders (don't call window or Math.random during render).
-  const [userId, setUserId] = useState<string>(() => process.env.NEXT_PUBLIC_USER_ID || "player_local");
-  const otherUserId = "opponent";
+  // Align with main: let env provide a stable id (may be undefined in TS types)
+  // Use a narrow assertion to keep the exact shape while compiling under strict TS.
+  const [userId, setUserId] = useState<string>(() => (process.env.NEXT_PUBLIC_USER_ID as unknown as string));
+  const otherUserId = "system-bot";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -68,21 +70,27 @@ export default function Home() {
     let cancelled = false;
     (async function init() {
       try {
-        // Use the userId as a safe fallback for name here
-        const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
-        const qs = new URLSearchParams({
-          user_id: userId || "player",
-          name: (/* prefer chosen name when available */ (typeof myUserName !== 'undefined' && myUserName) || userId || "Player"),
-        });
-        if (initialPhoto) qs.set("photo_url", initialPhoto);
-        const resp = await fetch(`${API_BASE}/talkjs/bootstrap?${qs.toString()}`, {
+        // Use our Next.js API route to bootstrap the TalkJS user + participant
+        // on the server (avoids CORS and keeps the secret on the server).
+        const resp = await fetch(`/api/join`, {
           method: "POST",
-          headers: { Accept: "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            playerId: userId || "player",
+            name: (typeof myUserName !== 'undefined' && myUserName) || userId || "Player",
+            photo: initialPhoto || undefined,
+            conversationId,
+          }),
         });
-        if (!cancelled && resp.ok) setJoinConfirmed(true);
-        else console.error("/talkjs/bootstrap failed", resp.status, await resp.text());
+        if (!cancelled && resp.ok) {
+          // try to parse response, but treat any 2xx as success
+          try { await resp.json(); } catch (e) {}
+          setJoinConfirmed(true);
+        } else {
+          console.error("/api/join failed", resp.status, await resp.text());
+        }
       } catch (e) {
-        console.error("/talkjs/bootstrap error", e);
+        console.error("/api/join error", e);
       }
 
       // Only touch the TalkJS SDK after the server join attempt above.
@@ -191,6 +199,30 @@ export default function Home() {
       } catch (e) {}
     };
   }, [joinConfirmed, userId]);
+
+  // Best-effort: when the tab/window closes, remove this player from the
+  // conversation participants on the server to keep the roster clean.
+  useEffect(() => {
+    if (!started || !userId) return;
+    const payload = JSON.stringify({ playerId: userId, conversationId });
+    const onUnload = () => {
+      try {
+        // Use Beacon API so it can complete during page unload
+        navigator.sendBeacon('/api/leave', payload);
+      } catch (e) {
+        // Fallback to fetch with keepalive
+        try {
+          fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
+        } catch (e2) { /* ignore */ }
+      }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    window.addEventListener('pagehide', onUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onUnload);
+      window.removeEventListener('pagehide', onUnload);
+    };
+  }, [started, userId]);
 
   
 
@@ -1295,7 +1327,7 @@ export default function Home() {
       const paddleBase = (DESIGN_W - RECT_W) / TRAVEL_TIME;
       const paddleV = dir !== 0 ? Math.round(paddleBase * mul) : 0;
       if (debugDomRef.current) {
-        debugDomRef.current.textContent = `speed: ${Math.round(speedMag)}  posX: ${Math.round(px)}  mul: ${mul.toFixed(2)}  padV: ${paddleV}${list ? `  powerups: ${list}` : ''}`;
+        debugDomRef.current.textContent = `conv: ${conversationId}  speed: ${Math.round(speedMag)}  posX: ${Math.round(px)}  mul: ${mul.toFixed(2)}  padV: ${paddleV}${list ? `  powerups: ${list}` : ''}`;
       }
       debugRafRef.current = requestAnimationFrame(step);
     }
