@@ -312,24 +312,23 @@ export default function Home() {
   // alphabet letter as a separate coloured box (with space between) and leaves
   // the typed buffer in a fixed bottom bar like a normal chat input area.
   // accept external btnRefs so parent can compute collisions in design-space
-  function LetterComposer({ onAppend, btnRefs }: { onAppend?: (ch: string) => void; btnRefs?: React.MutableRefObject<Array<HTMLButtonElement | null>> }) {
+  function LetterComposer({ onAppend, btnRefs }: { onAppend?: (ch: string) => void; btnRefs?: React.MutableRefObject<Array<HTMLElement | null>> }) {
     const letters = Array.from(Array(26)).map((_, i) => String.fromCharCode(65 + i));
     // use provided refs if available otherwise fall back to internal
-    const localBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+    const localBtnRefs = useRef<Array<HTMLElement | null>>([]);
     const btnRefsInternal = btnRefs || localBtnRefs;
 
     function pushLetter(l: string) {
       if (onAppend) onAppend(l);
     }
 
-  function renderButton(l: string, i: number, btnRefsRef: React.MutableRefObject<Array<HTMLButtonElement | null>>) {
+  function renderButton(l: string, i: number) {
       // map index -> hue across 0..320 degrees (rainbow) for smooth color map
       const hue = Math.round((i / 25) * 320); // 0..320
       const bg = `hsl(${hue} 85% 50%)`;
       return (
         <button
           key={l}
-          ref={(el) => { btnRefsRef.current[i] = el }}
           aria-label={`Insert ${l}`}
           tabIndex={-1}
           aria-disabled={true}
@@ -349,6 +348,8 @@ export default function Home() {
             fontWeight: 700,
             boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
             width: "100%",
+            position: 'relative',
+            zIndex: 1,
             // ensure background-color uses modern color syntax if the browser
             // supports it; fallback is still the HSL string above.
             backgroundColor: bg,
@@ -366,7 +367,15 @@ export default function Home() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(26, minmax(0, 1fr))", gap: 8, paddingBottom: 4 }}>
             {letters.map((l, i) => (
               // render each button to occupy one grid column so all 26 fit a single row
-              <div key={l} style={{ width: "100%" }}>{renderButton(l, i, btnRefsInternal)}</div>
+              <div
+                key={l}
+                ref={(el) => { btnRefsInternal.current[i] = el as HTMLElement; }}
+                style={{ width: "100%", position: "relative", overflow: "visible", willChange: "transform" }}
+              >
+                {/* persistent background layer for pulse (behind text) */}
+                <div className="letter-pulse-bg" aria-hidden style={{ position: 'absolute', inset: 0, borderRadius: 8, background: '#ffffff', opacity: 0, pointerEvents: 'none', zIndex: 0 }} />
+                {renderButton(l, i)}
+              </div>
             ))}
           </div>
         </div>
@@ -660,8 +669,8 @@ export default function Home() {
   // design inner container ref (the scaled design surface) so we can compute
   // element positions in design-space by converting client rects -> design coords
   const designInnerRef = useRef<HTMLDivElement | null>(null);
-  // parent-held refs for letter button DOM nodes (populated by LetterComposer)
-  const composerBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // parent-held refs for letter cell wrapper DOM nodes (populated by LetterComposer)
+  const composerBtnRefs = useRef<Array<HTMLElement | null>>([]);
   // precomputed letter button rects in design-space (x,y,width,height)
   // includes index and character so collisions can append the correct letter
   const letterRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number; idx: number; ch: string }>>([]);
@@ -789,6 +798,121 @@ export default function Home() {
     };
   }, [scale]);
 
+  // Apply a short wobble animation to the given letter block by index.
+  function wobbleLetterByIndex(idx: number, direction: 'left' | 'right') {
+    if (idx < 0 || idx >= composerBtnRefs.current.length) {
+      console.warn('[wobble] invalid index', { idx, total: composerBtnRefs.current.length });
+      return;
+    }
+    const el = composerBtnRefs.current[idx];
+    if (!el) {
+      console.warn('[wobble] element not found for index', { idx });
+      return;
+    }
+  // Prefer JS-driven wobble so we can steer in direction of travel
+  // (we still keep CSS classes available for fallback if desired)
+  const cls = direction === 'left' ? 'wobble-left' : 'wobble-right';
+  console.debug('[wobble] applying class (js wobble will run too)', { idx, direction, cls });
+  el.classList.remove('wobble-left');
+  el.classList.remove('wobble-right');
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  (el as HTMLElement).offsetWidth;
+  // Optionally apply the class as a backup (commented to avoid transform conflicts)
+  // el.classList.add(cls);
+    // Also run a JS fallback micro-animation in case CSS animations are blocked
+    // or overridden by transforms elsewhere.
+    try {
+      // Compute wobble vector opposite to ball travel (recoil)
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const mag = Math.hypot(vx, vy) || 1;
+      const ux = -vx / mag; // recoil opposite to travel
+      const uy = -vy / mag;
+      const AMP = 18; // px amplitude for visibility (slightly higher)
+      const dx = Math.round(ux * AMP);
+      const dy = Math.round(uy * AMP);
+      const rotSign = Math.sign(dx || 1); // rotate in horizontal recoil direction
+      const n1 = () => { (el as HTMLElement).style.transform = `translate(${dx}px, ${dy}px) rotate(${8 * rotSign}deg)`; };
+      const n2 = () => { (el as HTMLElement).style.transform = `translate(${Math.round(-dx * 0.4)}px, ${Math.round(-dy * 0.4)}px) rotate(${-4 * rotSign}deg)`; };
+      const n3 = () => { (el as HTMLElement).style.transform = `translate(0, 0) rotate(0)`; };
+      (el as HTMLElement).style.transition = 'transform 140ms cubic-bezier(0.25, 0.8, 0.25, 1)';
+      console.debug('[wobble] js vector', { idx, vx, vy, dx, dy });
+      requestAnimationFrame(() => {
+        n1();
+        window.setTimeout(() => {
+          n2();
+          window.setTimeout(() => {
+            n3();
+            window.setTimeout(() => {
+              (el as HTMLElement).style.transition = '';
+              (el as HTMLElement).style.transform = '';
+            }, 120);
+          }, 120);
+        }, 120);
+      });
+    } catch (e) {
+      // ignore JS fallback errors
+    }
+    const cleanup = () => {
+      console.debug('[wobble] animation cleanup', { idx });
+      el.classList.remove('wobble-left');
+      el.classList.remove('wobble-right');
+      el.removeEventListener('animationend', cleanup);
+    };
+    // If CSS class was used, cleanup on animation end
+    if (el.classList.contains('wobble-left') || el.classList.contains('wobble-right')) {
+      el.addEventListener('animationend', cleanup);
+    }
+    // Fallback timeout in case animationend doesn't fire (e.g. tab not visible)
+    window.setTimeout(cleanup, 400);
+  }
+
+  // Pulse the struck block: flash white and fade back using a fixed overlay (2s fade)
+  function pulseLetterByIndex(idx: number) {
+    if (idx < 0 || idx >= composerBtnRefs.current.length) {
+      console.warn('[pulse] invalid index', { idx, total: composerBtnRefs.current.length });
+      return;
+    }
+    const wrapper = composerBtnRefs.current[idx];
+    if (!wrapper) {
+      console.warn('[pulse] wrapper not found for index', { idx });
+      return;
+    }
+    // Use a fixed overlay on document.body so React re-renders do not interfere
+    try {
+      const host = (wrapper.querySelector('button') as HTMLElement) || wrapper;
+      const rect = host.getBoundingClientRect();
+      const overlay = document.createElement('div');
+      overlay.setAttribute('aria-hidden', 'true');
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        left: `${Math.round(rect.left)}px`,
+        top: `${Math.round(rect.top)}px`,
+        width: `${Math.round(rect.width)}px`,
+        height: `${Math.round(rect.height)}px`,
+        borderRadius: '8px',
+        background: '#ffffff',
+        opacity: '1',
+        pointerEvents: 'none',
+        zIndex: '2147480000',
+        boxShadow: '0 0 0 6px rgba(255,255,255,0.22), 0 2px 10px rgba(0,0,0,0.3)',
+        transition: 'opacity 1000ms linear, box-shadow 1000ms linear',
+      } as CSSStyleDeclaration);
+      document.body.appendChild(overlay);
+      // Brief flash, then fade overlay out over 2s
+      window.setTimeout(() => {
+        overlay.style.opacity = '0';
+        overlay.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
+        window.setTimeout(() => {
+          try { document.body.removeChild(overlay); } catch (e) {}
+        }, 1100);
+      }, 140);
+      console.debug('[pulse] overlay applied (body, 2s)', { idx, rect: { left: rect.left, top: rect.top, w: rect.width, h: rect.height } });
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // collision helper: rectangle vs circle (design-space coords)
   function rectCircleCollides(r: { x: number; y: number; w: number; h: number }, cx: number, cy: number, radius: number) {
     const closestX = Math.max(r.x, Math.min(cx, r.x + r.w));
@@ -819,13 +943,33 @@ export default function Home() {
       debugDomRef,
       setSpawned,
       setBlinkVisible,
-      // when physics detects a local letter hit, append locally and broadcast
+      // when physics detects a local letter hit, append locally and broadcast,
+      // and wobble the impacted letter block.
       onLetterHit: (ch: string) => {
         setBuffer((b) => {
           const nb = b + ch;
           try { mp.sendBuffer?.(nb); } catch (e) { /* ignore */ }
           return nb;
         });
+        // Wobble effect: determine which block was hit and which side to wobble towards
+        const idx = (typeof ch === 'string' && ch.length > 0) ? (ch.toUpperCase().charCodeAt(0) - 65) : -1;
+        if (idx >= 0 && idx < 26) {
+          // Decide wobble direction based on ball position relative to the block center
+          const rects = letterRectsRef.current;
+          const r = rects && rects[idx];
+          if (r) {
+            const centerX = r.x + r.w / 2;
+            const ballX = ballXRef.current;
+            // Keep direction only for logging continuity; pulse is direction-agnostic
+            const dir: 'left' | 'right' = ballX < centerX ? 'left' : 'right';
+            console.debug('[hit] letter', { ch, idx, rect: { x: r.x, y: r.y, w: r.w, h: r.h }, centerX, ballX, dir });
+            pulseLetterByIndex(idx);
+          } else {
+            // if rect not available, default to a right wobble
+            console.warn('[hit] rect not found for idx (pulse anyway)', { ch, idx });
+            pulseLetterByIndex(idx);
+          }
+        }
       },
       DESIGN_W,
       DESIGN_H,
