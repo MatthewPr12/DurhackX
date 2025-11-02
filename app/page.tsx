@@ -5,6 +5,12 @@ import { defaultTheme } from "@talkjs/react-components";
 import { getTalkSession } from "@talkjs/core";
 import durhackTheme, { Avatar } from "../engine/talkTheme";
 import createMultiplayer from "../engine/multiplayer";
+import { useEmojiSpawner } from "../engine/emoji-spawner";
+
+// Feature flag: toggle emoji spawner globally for this page
+const ENABLE_SPAWNER = true;
+// Default power-up cooldown duration (ms)
+const DEFAULT_COOLDOWN_TIME_MS = 5000;
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -461,6 +467,7 @@ export default function Home() {
   // interpolation.
   const playersDisplayRef = useRef<Record<string, { paddleX: number; ball: { x: number; y: number; r: number }; ballV?: { x: number; y: number }; samples?: Array<{ x: number; y: number; r: number; t: number }> }>>({});
   const displayRafRef = useRef<number | null>(null);
+  const debugRafRef = useRef<number | null>(null);
   const mp = useMemo(() => createMultiplayer(), []);
 
   // derive a consistent color per player id so each client shows a unique
@@ -588,7 +595,9 @@ export default function Home() {
         const dirCur = directionRef.current;
         if (dirCur !== 0) {
           // compute speed so that full travel takes TRAVEL_TIME seconds
-          const speed = (DESIGN_W - RECT_W) / TRAVEL_TIME; // px / s in design-space
+          // apply current speed multiplier (e.g., fire power-up) to paddle too
+          const boost = (speedMultiplierRef && typeof speedMultiplierRef.current === 'number') ? speedMultiplierRef.current : 1;
+          const speed = ((DESIGN_W - RECT_W) / TRAVEL_TIME) * boost; // px / s in design-space
           setRectX((x) => {
             let nx = x + dirCur * speed * dt;
             // clamp inside design width
@@ -677,6 +686,85 @@ export default function Home() {
 
   // velocity ref (vx, vy) in design-space px/s. Start moving downward.
   const velRef = useRef({ x: 0, y: SPEED });
+  // Speed multiplier for temporary effects (e.g., fire boost)
+  const speedMultiplierRef = useRef<number>(1);
+  const [activePowerups, setActivePowerups] = useState<Array<{ type: string; expiresAt: number }>>([]);
+  const activePowerupsRef = useRef<Array<{ type: string; expiresAt: number }>>([]);
+  useEffect(() => { activePowerupsRef.current = activePowerups; }, [activePowerups]);
+  // Per-powerup timers
+  const powerupTimersRef = useRef<Record<string, number>>({});
+
+  function clearAllPowerups() {
+    // Reset speed multiplier and cancel timers
+    speedMultiplierRef.current = 1;
+    for (const k in powerupTimersRef.current) {
+      clearTimeout(powerupTimersRef.current[k]);
+    }
+    powerupTimersRef.current = {} as Record<string, number>;
+    setActivePowerups([]);
+    activePowerupsRef.current = [];
+    // Rescale velocity back to base immediately
+    const vx = velRef.current.x;
+    const vy = velRef.current.y;
+    const mag = Math.hypot(vx, vy) || 1;
+    const target = SPEED * 1;
+    const scale = target / mag;
+    velRef.current = { x: vx * scale, y: vy * scale };
+  }
+  useEffect(() => {
+    return () => {
+      // Cleanup all power-up timers on unmount
+      for (const k in powerupTimersRef.current) {
+        clearTimeout(powerupTimersRef.current[k]);
+      }
+      powerupTimersRef.current = {} as Record<string, number>;
+    };
+  }, []);
+
+  // Compute effective speed multiplier from active powerups and apply immediately
+  function recomputeSpeedMultiplier() {
+    const hasFire = activePowerupsRef.current.some((p) => p.type === 'fire');
+    const FIRE_MULTIPLIER = 1.2; // reduce fire boost to 1.2x
+    const targetMul = hasFire ? FIRE_MULTIPLIER : 1;
+    if (speedMultiplierRef.current !== targetMul) {
+      speedMultiplierRef.current = targetMul;
+      // Rescale current velocity to match new target magnitude
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const mag = Math.hypot(vx, vy) || 1;
+      const target = SPEED * targetMul;
+      const scale = target / mag;
+      velRef.current = { x: vx * scale, y: vy * scale };
+    }
+  }
+
+  // Generic, non-stacking power-up apply; refreshes duration if re-collected
+  function applyPowerup(type: string) {
+    const now = Date.now();
+    const expiresAt = now + DEFAULT_COOLDOWN_TIME_MS;
+    const prev = activePowerupsRef.current;
+    const idx = prev.findIndex((p) => p.type === type);
+    const next = [...prev];
+    if (idx >= 0) next[idx] = { type, expiresAt }; else next.push({ type, expiresAt });
+    activePowerupsRef.current = next;
+    setActivePowerups(next);
+    // manage timer
+    if (powerupTimersRef.current[type] != null) {
+      clearTimeout(powerupTimersRef.current[type]);
+      delete powerupTimersRef.current[type];
+    }
+    powerupTimersRef.current[type] = window.setTimeout(() => {
+      const cur = activePowerupsRef.current.filter((p) => p.type !== type);
+      activePowerupsRef.current = cur;
+      setActivePowerups(cur);
+      delete powerupTimersRef.current[type];
+      recomputeSpeedMultiplier();
+    }, DEFAULT_COOLDOWN_TIME_MS);
+    // apply immediately
+    recomputeSpeedMultiplier();
+  }
+
+  
   const physicsRaf = useRef<number | null>(null);
   const lastPhysics = useRef<number | null>(null);
   // respawn control: when ball falls off bottom we will respawn it in the center
@@ -693,9 +781,47 @@ export default function Home() {
   // fallback so respawn happens even if RAF is throttled/stalled.
   const respawnDeadlineRef = useRef<number | null>(null);
   const respawnTimerRef = useRef<number | null>(null);
+  // Emoji spawns via external hook
+  const { spawns, consumeSpawn } = useEmojiSpawner({
+    started: started && ENABLE_SPAWNER,
+    designW: DESIGN_W,
+    designH: DESIGN_H,
+    rectH: RECT_H,
+    respawnY: RESPAWN_Y_PX,
+    paddleBottomOffset: 96,
+    letterRectsRef,
+    ballRadiusRef,
+  });
+
+  // Collision check between ball and emoji spawns; consume on hit and apply effect
+  useEffect(() => {
+    if (!started || !ENABLE_SPAWNER) return;
+    let raf: number | null = null;
+    function step() {
+      const cx = ballXRef.current;
+      const cy = ballYRef.current;
+      const br = ballRadiusRef.current;
+      // Iterate over a snapshot to avoid mutation issues during consume
+      for (const s of spawns) {
+        const dx = cx - s.x;
+        const dy = cy - s.y;
+        const rr = br + s.size / 2;
+        if (dx * dx + dy * dy <= rr * rr) {
+          // Consume and apply corresponding effect
+          try { consumeSpawn(s.id); } catch {}
+          if (s.emoji === '🔥') applyPowerup('fire');
+        }
+      }
+      raf = requestAnimationFrame(step);
+    }
+    raf = requestAnimationFrame(step);
+    return () => { if (raf != null) cancelAnimationFrame(raf); };
+  }, [spawns, started]);
 
   // helper to start the blink + resume sequence (shared between RAF and timeout)
   function startRespawnBlink() {
+  // Clear any accrued powerups on respawn start
+  clearAllPowerups();
   // set position to configured spawn point (design-space px)
   // reset bottom-crossed marker so future crossings will re-log
   bottomCrossedRef.current = false;
@@ -977,7 +1103,9 @@ export default function Home() {
       RECT_H,
       BALL_RADIUS_REF: ballRadiusRef,
       SPEED,
+      SPEED_MULTIPLIER_REF: speedMultiplierRef,
       RESPAWN_DELAY,
+      onDespawn: clearAllPowerups,
       otherPaddlesRef,
       startRespawnBlink,
     });
@@ -1153,6 +1281,30 @@ export default function Home() {
     };
   }, []);
 
+  // Update the top-left debug overlay with current speed, paddle X, and powerups
+  useEffect(() => {
+    function step() {
+      const vx = velRef.current.x;
+      const vy = velRef.current.y;
+      const speedMag = Math.hypot(vx, vy);
+      const px = rectXRef.current;
+      const list = activePowerupsRef.current.map((p) => p.type).join(', ');
+      const mul = (typeof speedMultiplierRef.current === 'number' ? speedMultiplierRef.current : 1);
+      const dir = directionRef.current;
+      const paddleBase = (DESIGN_W - RECT_W) / TRAVEL_TIME;
+      const paddleV = dir !== 0 ? Math.round(paddleBase * mul) : 0;
+      if (debugDomRef.current) {
+        debugDomRef.current.textContent = `speed: ${Math.round(speedMag)}  posX: ${Math.round(px)}  mul: ${mul.toFixed(2)}  padV: ${paddleV}${list ? `  powerups: ${list}` : ''}`;
+      }
+      debugRafRef.current = requestAnimationFrame(step);
+    }
+    debugRafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (debugRafRef.current != null) cancelAnimationFrame(debugRafRef.current);
+      debugRafRef.current = null;
+    };
+  }, []);
+
   return (
     <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)", overflow: "hidden" }}>
     <main className="flex flex-col items-center justify-center gap-6" style={{ paddingBottom: 0 }}>
@@ -1179,6 +1331,35 @@ export default function Home() {
           <div className="mt-6" style={{ display: "flex", justifyContent: "center", width: "100%" }}>
             {/* wrapper: single centered container that holds the play area and an absolutely positioned control */}
             <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "visible", position: "relative" }}>
+              {/* debug overlay outside the play area, top-left above the A–Z array */}
+              <div
+                ref={debugDomRef}
+                aria-live="polite"
+                role="status"
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: -44,
+                  zIndex: 100,
+                  color: '#E5E7EB',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  background: 'rgba(0,0,0,0.5)',
+                  padding: '4px 6px',
+                  borderRadius: 6,
+                  pointerEvents: 'none',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+                  letterSpacing: 0.2,
+                  backdropFilter: 'blur(2px)',
+                  minWidth: 140,
+                  minHeight: 18,
+                  display: 'inline-flex',
+                  alignItems: 'center'
+                }}
+              >
+                {/* placeholder so it's visible even before first RAF update */}
+                <span style={{ opacity: 0.6 }}>…</span>
+              </div>
               <div style={{ position: 'absolute', right: 12, top: -44, zIndex: 90 }}>
                 <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
               </div>
@@ -1223,11 +1404,38 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* (moved) debug overlay now renders outside play area */}
+
               {/* render user avatar as a physics 'ball' (positioned absolutely in design-space) */}
               {
                 /* Ball will be positioned using ballX/ballY (center coords). */
               }
               <div style={{ position: "absolute", left: 0, top: 0, width: DESIGN_W, height: DESIGN_H, pointerEvents: "none" }}>
+                {/* transient emoji spawns (behind ball/paddles) */}
+                {ENABLE_SPAWNER && spawns.map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      position: 'absolute',
+                      left: Math.round(s.x - s.size / 2),
+                      top: Math.round(s.y - s.size / 2),
+                      width: s.size,
+                      height: s.size,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: s.size,
+                      lineHeight: 1,
+                      pointerEvents: 'none',
+                      zIndex: 5,
+                      filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.25))',
+                    }}
+                    aria-hidden
+                  >
+                    <span>{s.emoji}</span>
+                  </div>
+                ))}
+
                 {/* remote players' balls and paddles (updated from network) */}
                 {playersSnapshot.map((p) => {
                   if (!p || p.playerId === userId) return null;
@@ -1274,12 +1482,7 @@ export default function Home() {
                 >
                   <Avatar name={myUserName} src={myPhoto} size={ballRadius * 2} />
                 </div>
-                {/* small debug overlay text updated from RAF */}
-                <div
-                  ref={debugDomRef}
-                  style={{ position: "absolute", right: 12, top: 12, pointerEvents: "none", color: "#fff", fontFamily: "monospace", fontSize: 12, background: "rgba(0,0,0,0.45)", padding: "6px 8px", borderRadius: 6 }}
-                  aria-hidden
-                />
+                {/* debug overlay moved outside play area (top-left, same row as Change name) */}
               </div>
 
               {/* chat area fills remaining space */}

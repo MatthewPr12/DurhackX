@@ -27,12 +27,15 @@ export function startPhysics(opts: {
   setBlinkVisible: (v: boolean) => void;
   // callback used when a letter box is hit by the local ball
   onLetterHit?: (ch: string) => void;
+  // optional callback when the ball falls off screen (despawn moment)
+  onDespawn?: () => void;
   DESIGN_W: number;
   DESIGN_H: number;
   RECT_W: number;
   RECT_H: number;
   BALL_RADIUS_REF: React.MutableRefObject<number>;
   SPEED: number;
+  SPEED_MULTIPLIER_REF?: React.MutableRefObject<number>;
   RESPAWN_DELAY: number;
   // other players' paddles (in design-space) — array of { x, w }
   otherPaddlesRef?: React.MutableRefObject<Array<{ x: number; w: number }>>;
@@ -60,6 +63,7 @@ export function startPhysics(opts: {
     BALL_RADIUS_REF,
     SPEED,
     RESPAWN_DELAY,
+    onDespawn,
     startRespawnBlink,
   } = opts;
 
@@ -75,26 +79,28 @@ export function startPhysics(opts: {
   }
 
   // Set velocity vector by an upward-facing bounce angle (0 = straight up).
-  function setVelocityFromAngle(angleRad: number) {
-    const vx = SPEED * Math.sin(angleRad);
-    const vy = -Math.abs(SPEED * Math.cos(angleRad)); // always bounce upward
+  function setVelocityFromAngle(angleRad: number, speedMag: number) {
+    const vx = speedMag * Math.sin(angleRad);
+    const vy = -Math.abs(speedMag * Math.cos(angleRad)); // always bounce upward
     velRef.current = { x: vx, y: vy };
   }
 
   // Ensure the speed magnitude remains approximately SPEED.
-  function normalizeSpeed() {
+  function normalizeSpeed(speedMag: number) {
     const vx = velRef.current.x;
     const vy = velRef.current.y;
     const mag = Math.hypot(vx, vy) || 1;
-    const scale = SPEED / mag;
+    const scale = speedMag / mag;
     velRef.current = { x: vx * scale, y: vy * scale };
   }
-
   function step(ts: number) {
     if (!mounted) return;
     if (lastPhysics == null) lastPhysics = ts;
     const dt = (ts - (lastPhysics || ts)) / 1000;
     lastPhysics = ts;
+
+    // Recompute current target speed magnitude each frame so bounces respect live multipliers
+    const SPEED_CUR = SPEED * (opts.SPEED_MULTIPLIER_REF?.current ?? 1);
 
   const vx = velRef.current.x;
   const vy = velRef.current.y;
@@ -106,23 +112,23 @@ export function startPhysics(opts: {
       velRef.current.x = Math.abs(vx);
       nextX = BALL_RADIUS;
       // Safety: avoid perfectly horizontal wall ping-pong
-      const MIN_VERT = SPEED * 0.12;
+      const MIN_VERT = SPEED_CUR * 0.12;
       if (Math.abs(velRef.current.y) < MIN_VERT) {
         velRef.current.y = (velRef.current.y >= 0 ? MIN_VERT : -MIN_VERT);
-        normalizeSpeed();
+        normalizeSpeed(SPEED_CUR);
       }
     } else if (nextX + BALL_RADIUS >= DESIGN_W) {
       velRef.current.x = -Math.abs(vx);
       nextX = DESIGN_W - BALL_RADIUS;
-      const MIN_VERT = SPEED * 0.12;
+      const MIN_VERT = SPEED_CUR * 0.12;
       if (Math.abs(velRef.current.y) < MIN_VERT) {
         velRef.current.y = (velRef.current.y >= 0 ? MIN_VERT : -MIN_VERT);
-        normalizeSpeed();
+        normalizeSpeed(SPEED_CUR);
       }
     }
     ballXRef.current = nextX;
 
-    const nextY = ballYRef.current + vy * dt;
+  const nextY = ballYRef.current + vy * dt;
     const paddleTop = DESIGN_H - 96 - RECT_H;
     const bx = ballXRef.current;
     // Estimate paddle velocity (px/s) based on last position sample
@@ -156,6 +162,8 @@ export function startPhysics(opts: {
       if (!handled && nextY - BALL_RADIUS <= 0) {
         velRef.current.y = Math.abs(vy);
         ballYRef.current = BALL_RADIUS;
+        // keep magnitude consistent with current speed multiplier
+        normalizeSpeed(SPEED_CUR);
         handled = true;
       }
 
@@ -169,6 +177,7 @@ export function startPhysics(opts: {
         }
         setSpawned(false);
         setBlinkVisible(false);
+        try { onDespawn && onDespawn(); } catch {}
         // schedule respawn
   respawnDeadlineRef.current = ts + RESPAWN_DELAY * 1000;
         if (respawnTimerRef.current != null) {
@@ -199,17 +208,17 @@ export function startPhysics(opts: {
           angle += clamp(paddleVx * SPIN_FACTOR, -MAX_ANGLE * 0.5, MAX_ANGLE * 0.5);
           // Final clamp to avoid near-horizontal rebounds
           angle = clamp(angle, -MAX_ANGLE + 0.05, MAX_ANGLE - 0.05);
-          setVelocityFromAngle(angle);
+          setVelocityFromAngle(angle, SPEED_CUR);
           // Avoid near-vertical bounces: ensure a minimum horizontal component
-          const MIN_HORIZ = SPEED * 0.15;
-          const MIN_VERT = SPEED * 0.12;
+          const MIN_HORIZ = SPEED_CUR * 0.15;
+          const MIN_VERT = SPEED_CUR * 0.12;
           if (Math.abs(velRef.current.x) < MIN_HORIZ) {
             velRef.current.x = (velRef.current.x >= 0 ? 1 : -1) * MIN_HORIZ;
           }
           if (Math.abs(velRef.current.y) < MIN_VERT) {
             velRef.current.y = -MIN_VERT; // always bounce upward from paddle
           }
-          normalizeSpeed();
+          normalizeSpeed(SPEED_CUR);
           ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
           handled = true;
         }
@@ -225,16 +234,16 @@ export function startPhysics(opts: {
               let angle = offset * MAX_ANGLE;
               // Clamp to avoid near-horizontal rebounds
               angle = clamp(angle, -MAX_ANGLE + 0.05, MAX_ANGLE - 0.05);
-              setVelocityFromAngle(angle);
-              const MIN_HORIZ = SPEED * 0.15;
-              const MIN_VERT = SPEED * 0.12;
+              setVelocityFromAngle(angle, SPEED_CUR);
+              const MIN_HORIZ = SPEED_CUR * 0.15;
+              const MIN_VERT = SPEED_CUR * 0.12;
               if (Math.abs(velRef.current.x) < MIN_HORIZ) {
                 velRef.current.x = (velRef.current.x >= 0 ? 1 : -1) * MIN_HORIZ;
               }
               if (Math.abs(velRef.current.y) < MIN_VERT) {
                 velRef.current.y = -MIN_VERT;
               }
-              normalizeSpeed();
+              normalizeSpeed(SPEED_CUR);
               ballYRef.current = Math.max(0, paddleTop - BALL_RADIUS);
               handled = true;
               break;
@@ -289,7 +298,8 @@ export function startPhysics(opts: {
           setBlinkVisible(true);
           respawningRef.current = false;
           const R = (Math.random() * 0.5 + 0.25) * Math.PI * 2;
-          velRef.current = { x: SPEED * Math.sin(R), y: SPEED * Math.abs(Math.cos(R)) };
+          const SPEED_CUR2 = SPEED * (opts.SPEED_MULTIPLIER_REF?.current ?? 1);
+          velRef.current = { x: SPEED_CUR2 * Math.sin(R), y: SPEED_CUR2 * Math.abs(Math.cos(R)) };
         }
       }, 180);
     }
