@@ -6,13 +6,16 @@ import { defaultTheme } from "@talkjs/react-components";
 // Avatar when given a photo URL, otherwise fall back to a simple initials
 // circle. We keep this component independent so it can be used in the
 // TalkJS theme or in other UI locations (game ball rendering).
-export function Avatar({ name, src, size = 48 }: { name: string; src?: string; size?: number }) {
-  const initials = name
-    .split(" ")
-    .map((s) => s[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+export function Avatar({ name, src, size = 48 }: { name?: string; src?: string; size?: number }) {
+  const safeName = (name || "").trim();
+  const initials = (safeName
+    ? safeName
+        .split(/\s+/)
+        .map((s) => (s && s[0]) || "")
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : "?");
 
   const [imgFailed, setImgFailed] = useState(false);
 
@@ -20,7 +23,11 @@ export function Avatar({ name, src, size = 48 }: { name: string; src?: string; s
     const { Avatar: TalkAvatar } = defaultTheme as any;
     if (TalkAvatar && src && !imgFailed) {
       // TalkAvatar expects photoUrl prop in the TalkJS theme
-      return <TalkAvatar photoUrl={src} /> as any;
+      try {
+        return <TalkAvatar photoUrl={src} name={safeName || undefined} /> as any;
+      } catch (e) {
+        // fall through to local render
+      }
     }
   } catch (e) {
     // ignore and fall back to local rendering

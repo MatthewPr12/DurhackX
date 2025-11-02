@@ -30,12 +30,19 @@ export default function Home() {
   const initialPhoto = process.env.NEXT_PUBLIC_USER_PHOTO || "";
   const [myPhoto, setMyPhoto] = useState<string | undefined>(initialPhoto || undefined);
 
+  // Whether the server has confirmed the user/participant was created.
+  const [joinConfirmed, setJoinConfirmed] = useState<boolean>(false);
+
+  
+
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
 
   useEffect(() => {
     if (!appId) return;
     if (typeof window === "undefined") return;
+    // don't initialize until the user explicitly started (or a saved session restored)
+    if (!started) return;
 
     // create a TalkJS session (uses the durhack host from the docs)
     if (!sessionRef.current) {
@@ -45,16 +52,48 @@ export default function Home() {
 
     const session = sessionRef.current;
 
-    // create demo users and a conversation if they don't exist
-    // include a photoUrl if provided for a better avatar experience
-  session.currentUser.createIfNotExists({ name: "Player", photoUrl: initialPhoto || undefined });
-    session.user(otherUserId).createIfNotExists({ name: "Nina" });
+    // Create user/participant server-side first (avoid USER_NOT_FOUND race).
+    // After the server confirms, perform local SDK createIfNotExists and
+    // conversation setup.
+    let cancelled = false;
+    (async function init() {
+      try {
+        // Use the userId as a safe fallback for name here to avoid
+        // referencing state that may be declared later in the file.
+        const payload = { playerId: userId, name: userId || "Player", photo: initialPhoto || undefined, conversationId };
+        const resp = await fetch("/api/join", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!cancelled && resp.ok) {
+          setJoinConfirmed(true);
+        } else {
+          // eslint-disable-next-line no-console
+          console.error("/api/join failed", resp.status, await resp.text());
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("/api/join error", e);
+      }
 
-    const conversation = session.conversation(conversationId);
-    conversation.createIfNotExists();
-    conversation.participant(otherUserId).createIfNotExists();
-    // keep a reference to the conversation so UI components can send messages
-    conversationRef.current = conversation;
+      // Only touch the TalkJS SDK after the server join attempt above.
+      try {
+  // Best-effort: if joinConfirmed was set we proceed; in case the
+  // server responded slowly we still try the safe SDK calls here.
+  session.currentUser.createIfNotExists({ name: userId || "Player", photoUrl: initialPhoto || undefined });
+        session.user(otherUserId).createIfNotExists({ name: "Nina" });
+
+        const conversation = session.conversation(conversationId);
+        conversation.createIfNotExists();
+        conversation.participant(otherUserId).createIfNotExists();
+        // keep a reference to the conversation so UI components can send messages
+        conversationRef.current = conversation;
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("TalkJS SDK init error", e);
+      }
+    })();
 
     return () => {
       // tidy up TalkJS session when component unmounts
@@ -65,7 +104,66 @@ export default function Home() {
       }
       sessionRef.current = null;
     };
-  }, [appId]);
+  }, [appId, userId, initialPhoto]);
+
+  // Subscribe to TalkJS conversation messages and log them to the console.
+  useEffect(() => {
+    if (!joinConfirmed) return;
+    const conv: any = conversationRef.current;
+    if (!conv) return;
+    let unsub: any = null;
+    try {
+        if (typeof conv.subscribe === 'function') {
+        unsub = conv.subscribe((evt: any) => {
+          // evt shape may vary depending on SDK version. Try common shapes.
+          const message = evt && (evt.message || evt);
+
+          // Defensive: sometimes the subscription emits conversation-level
+          // metadata (conversation object) instead of a message. Those objects
+          // commonly include id/createdAt/lastMessageAt and do not have
+          // text/body/content fields. Detect and label them so we don't
+          // mis-log them as an incoming chat message.
+          const looksLikeConvMeta = message && typeof message === 'object' &&
+            ('createdAt' in message || 'lastMessageAt' in message) &&
+            !('text' in message) && !('body' in message) && !('content' in message) && !('displayText' in message) && !('message' in message);
+
+          if (looksLikeConvMeta) {
+            console.log('[talk] conversation update (not a chat message)', { raw: message });
+            return;
+          }
+
+          // message may contain .text or .body or .content
+          const text = message && (message.text || message.body || message.content || message.message || message.displayText) || message;
+          const sender = message && (message.sender && (message.sender.id || message.sender) || message.from && (message.from.id || message.from) || message.senderId) || 'unknown';
+          console.log('[talk] message received', { text, from: sender, raw: message });
+        });
+      } else if (typeof conv.on === 'function') {
+        const cb = (m: any) => {
+          // guard against conversation-level events that some SDKs may emit
+          const looksLikeConvMeta = m && typeof m === 'object' && ('createdAt' in m || 'lastMessageAt' in m) && !('text' in m) && !('body' in m) && !('content' in m) && !('displayText' in m) && !('message' in m);
+          if (looksLikeConvMeta) {
+            console.log('[talk] conversation update (not a chat message)', { raw: m });
+            return;
+          }
+
+          const text = m && (m.text || m.body || m.content || m.displayText) || m;
+          const sender = m && (m.sender && (m.sender.id || m.sender) || m.from && (m.from.id || m.from) || m.senderId) || 'unknown';
+          console.log('[talk] message received', { text, from: sender, raw: m });
+        };
+        conv.on('message', cb);
+        unsub = () => conv.off && conv.off('message', cb);
+      }
+    } catch (e) {
+      // ignore subscription errors
+    }
+
+    return () => {
+      try {
+        if (typeof unsub === 'function') unsub();
+        if (conv && typeof conv.unsubscribe === 'function') conv.unsubscribe();
+      } catch (e) {}
+    };
+  }, [joinConfirmed, userId]);
 
   
 
@@ -106,6 +204,7 @@ export default function Home() {
   // opening another tab or reloading keeps the same identity during testing.
   const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
   const [started, setStarted] = useState<boolean>(false);
+  
 
   // When the user starts a session (enters their name), ensure the TalkJS
   // currentUser reflects the chosen name and photo.
@@ -259,26 +358,60 @@ export default function Home() {
   }
 
   // Bottom buffer bar — fixed to bottom of viewport to look like a normal input.
-  function BufferBar({ buffer, onEnter, onClear, inline }: { buffer: string; onEnter: () => void; onClear: () => void; inline?: boolean }) {
+  function BufferBar({ buffer, onEnter, onClear, inline, disabled }: { buffer: string; onEnter: () => void; onClear: () => void; inline?: boolean; disabled?: boolean }) {
     // inline === true -> render as positioned element to sit inside the aspect container
     if (inline) {
       return (
-        <div style={{ position: "absolute", left: 12, right: 12, bottom: 12, padding: 12, borderTop: "1px solid rgba(255,255,255,0.06)", background: "#0b0b0b", display: "flex", gap: 12, alignItems: "center", borderRadius: 8 }}>
+        <div style={{ position: "absolute", left: 12, right: 12, bottom: 12, padding: 12, borderTop: "1px solid rgba(255,255,255,0.06)", background: "#0b0b0b", display: "flex", gap: 12, alignItems: "center", borderRadius: 8, pointerEvents: 'auto', zIndex: 120 }}>
           <div style={{ padding: "8px 12px", borderRadius: 8, background: "#111111", color: "#e5e7eb", flex: 1, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{buffer || <span style={{ color: "#6b7280" }}>buffer</span>}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onClear} style={{ padding: "8px 12px", borderRadius: 8, background: "#1f2937", color: "#e5e7eb", border: "none" }}>Clear</button>
-            <button onClick={onEnter} style={{ padding: "8px 12px", borderRadius: 8, background: "#2563EB", color: "white", border: "none" }}>Enter</button>
+            <button
+              type="button"
+              onClick={() => { console.log('[talk] BufferBar Clear clicked'); onClear(); }}
+              onPointerDown={() => { console.debug('[talk] BufferBar Clear pointerdown'); }}
+              style={{ padding: "8px 12px", borderRadius: 8, background: "#1f2937", color: "#e5e7eb", border: "none", cursor: 'pointer', pointerEvents: 'auto' }}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={() => { console.log('[talk] BufferBar Enter clicked'); if (!disabled) onEnter(); }}
+              onPointerDown={(e) => { console.debug('[talk] BufferBar Enter pointerdown', { disabled }); }}
+              onPointerUp={(e) => { console.debug('[talk] BufferBar Enter pointerup', { disabled }); if (!disabled && e.button === 0) onEnter(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !disabled) { console.debug('[talk] BufferBar Enter keydown'); onEnter(); } }}
+              disabled={disabled}
+              style={{ padding: "8px 12px", borderRadius: 8, background: disabled ? "#1e40af" : "#2563EB", color: "white", border: "none", cursor: disabled ? 'not-allowed' : 'pointer', pointerEvents: 'auto', opacity: disabled ? 0.6 : 1 }}
+            >
+              Enter
+            </button>
           </div>
         </div>
       );
     }
 
     return (
-      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, padding: 12, borderTop: "1px solid rgba(255,255,255,0.06)", background: "#0b0b0b", display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, padding: 12, borderTop: "1px solid rgba(255,255,255,0.06)", background: "#0b0b0b", display: "flex", gap: 12, alignItems: "center", zIndex: 120 }}>
         <div style={{ padding: "8px 12px", borderRadius: 8, background: "#111111", color: "#e5e7eb", flex: 1, fontFamily: "monospace" }}>{buffer || <span style={{ color: "#6b7280" }}>buffer</span>}</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onClear} style={{ padding: "8px 12px", borderRadius: 8, background: "#1f2937", color: "#e5e7eb", border: "none" }}>Clear</button>
-          <button onClick={onEnter} style={{ padding: "8px 12px", borderRadius: 8, background: "#2563EB", color: "white", border: "none" }}>Enter</button>
+          <button
+            type="button"
+            onClick={() => { console.log('[talk] BufferBar Clear clicked'); onClear(); }}
+            onPointerDown={() => { console.debug('[talk] BufferBar Clear pointerdown'); }}
+            style={{ padding: "8px 12px", borderRadius: 8, background: "#1f2937", color: "#e5e7eb", border: "none", cursor: 'pointer' }}
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={() => { console.log('[talk] BufferBar Enter clicked'); if (!disabled) onEnter(); }}
+            onPointerDown={(e) => { console.debug('[talk] BufferBar Enter pointerdown', { disabled }); }}
+            onPointerUp={(e) => { console.debug('[talk] BufferBar Enter pointerup', { disabled }); if (!disabled && e.button === 0) onEnter(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !disabled) { console.debug('[talk] BufferBar Enter keydown'); onEnter(); } }}
+            disabled={disabled}
+            style={{ padding: "8px 12px", borderRadius: 8, background: disabled ? "#1e40af" : "#2563EB", color: "white", border: "none", cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.6 : 1 }}
+          >
+            {disabled ? 'Joining...' : 'Enter'}
+          </button>
         </div>
       </div>
     );
@@ -370,11 +503,25 @@ export default function Home() {
 
   async function handleEnter() {
     const conv = conversationRef.current;
-    if (!conv) return;
+    // Instrumentation: log call and conversation readiness to help debug click-no-op
+    // eslint-disable-next-line no-console
+    console.log('[talk] handleEnter invoked', { buffer, convExists: !!conv, sendType: conv ? typeof conv.send : 'undefined', joinConfirmed });
+    if (!conv) {
+      // If there's no active conversation, clear the buffer to avoid
+      // leaving stale text in the UI and surface a console warning.
+      // This prevents the Enter button from appearing to do nothing.
+      // eslint-disable-next-line no-console
+      console.warn('[talk] handleEnter: no conversation available');
+      setBuffer("");
+      return;
+    }
     const text = buffer.trim();
     if (!text) return setBuffer("");
     try {
       await conv.send(text);
+      // Log that we sent a message (sender is current user)
+      // Use a short console tag so devs can easily grep messages.
+      console.log('[talk] message sent', { text, from: userId });
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("TalkJS send failed", e);
@@ -693,7 +840,8 @@ export default function Home() {
     }
     const myColor = pickColorIndex();
     assignedColorRef.current = myColor;
-    mp.connect(pid, myUserName, myPhoto, myColor);
+  // createMultiplayer.connect expects (id, name?, photo?) — pass only those
+  mp.connect(pid, myUserName, myPhoto);
     // receive updates
     const off = mp.onUpdate((u) => {
       if (!u || !u.playerId) return;
@@ -868,15 +1016,16 @@ export default function Home() {
           <div className="mt-4 text-sm text-red-600">Set NEXT_PUBLIC_TALKJS_APP_ID in your environment to enable the chat.</div>
         ) : (
           <div className="mt-6" style={{ display: "flex", justifyContent: "center", width: "100%" }}>
-            {/* fixed design window scaled via CSS transform so all clients see the same layout */}
-            <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "hidden", position: "relative" }}>
-              <div ref={designInnerRef} style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
+            {/* wrapper: single centered container that holds the play area and an absolutely positioned control */}
+            <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "visible", position: "relative" }}>
+              <div style={{ position: 'absolute', right: 12, top: -44, zIndex: 90 }}>
+                <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
+              </div>
+              {/* fixed design window scaled via CSS transform so all clients see the same layout */}
+              <div style={{ width: DESIGN_W * scale, height: DESIGN_H * scale, overflow: "hidden", position: "relative" }}>
+                <div ref={designInnerRef} style={{ width: DESIGN_W, height: DESIGN_H, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute", top: 0, left: 0, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box", borderRadius: 12, background: "transparent" }}>
               {/* composer at the top */}
               <div style={{ flex: "0 0 auto" }}>
-                {/* change-name control (top-right) */}
-                <div style={{ position: 'absolute', right: 12, top: 12, zIndex: 80 }}>
-                  <button onClick={handleChangeName} style={{ padding: '6px 10px', borderRadius: 8, background: '#111827', color: '#e5e7eb', border: '1px solid rgba(255,255,255,0.04)', cursor: 'pointer' }} title="Change display name">Change name</button>
-                </div>
                 <LetterComposer onAppend={handleAppend} btnRefs={composerBtnRefs} />
               </div>
 
@@ -957,10 +1106,11 @@ export default function Home() {
               </div>
 
               {/* inline buffer bar inside the fixed window so it scales */}
-              <BufferBar buffer={buffer} onEnter={handleEnter} onClear={handleClear} inline />
+              <BufferBar buffer={buffer} onEnter={handleEnter} onClear={handleClear} inline disabled={!joinConfirmed} />
               </div>
             </div>
           </div>
+        </div>
         )}
       </main>
   {/* previously we rendered a fixed buffer bar; it's now rendered inline inside the aspect container */}
