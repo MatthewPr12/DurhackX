@@ -1258,16 +1258,41 @@ export default function Home() {
 
               {/* Movable rectangle and on-screen controls (inside design surface) */}
               <div style={{ position: "absolute", left: 0, top: 0, width: DESIGN_W, height: DESIGN_H, pointerEvents: "none" }}>
-                {/* the moving rectangle (pointerEvents auto so it can be interactive if desired) */}
-                <div style={{ position: "absolute", left: rectX, bottom: 96, width: RECT_W, height: RECT_H, background: (assignedColorRef.current != null ? colorForId(userId, assignedColorRef.current) : colorForId(userId)), borderRadius: 8, pointerEvents: "auto", display: "flex", alignItems: "center", justifyContent: "center", color: "#000", fontWeight: 700, fontFamily: "monospace" }}>
-                  {myUserName}
+                {/* Local paddle: render as an input-like buffer bar showing current buffer or a placeholder */}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: rectX,
+                    bottom: 96,
+                    width: RECT_W,
+                    height: RECT_H,
+                    background: "#0f1724",
+                    border: "1px solid rgba(255,255,255,0.06)",
+                    borderRadius: 8,
+                    pointerEvents: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-start",
+                    padding: "0 10px",
+                    color: "#e5e7eb",
+                    fontFamily: "monospace",
+                    fontSize: 14,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+                  }}
+                  aria-label="Chat input buffer"
+                >
+                  <span style={{ color: buffer ? "#e5e7eb" : "#9CA3AF", fontStyle: buffer ? "normal" as const : "italic" as const }}>
+                    {buffer || "Say something..."}
+                  </span>
                 </div>
 
                 {/* on-screen arrow buttons removed — keyboard only (ArrowLeft / ArrowRight) */}
               </div>
 
-              {/* inline buffer bar inside the fixed window so it scales */}
-              <BufferBar buffer={buffer} onEnter={handleEnter} onClear={handleClear} inline disabled={!joinConfirmed} />
+              {/* inline BufferBar removed: the paddle now displays the buffer */}
               </div>
             </div>
           </div>
