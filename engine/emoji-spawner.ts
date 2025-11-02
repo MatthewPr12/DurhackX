@@ -6,8 +6,8 @@ export const DEFAULT_SIZE = 30; // px in design-space
 const EMOJI_VARIANTS: Array<{ emoji: string; size: number; lifetimeMs: number }> = [
   { emoji: "🔥", size: DEFAULT_SIZE, lifetimeMs: DEFAULT_LIFETIME_MS },
 ];
-const DEFAULT_RATE_PER_SEC = 0.5; // lambda for Poisson process
-const DEFAULT_EXCLUDE_BUFFER = 24; // extra width added to ball diameter for no-spawn lane
+const DEFAULT_RATE_PER_SEC = 0.1; // lambda for Poisson process
+const DEFAULT_EXCLUDE_BUFFER = 30; // extra width added to ball diameter for no-spawn lane
 
 export type Spawn = {
   id: number;
