@@ -2,10 +2,11 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { getTalkSession } from "@talkjs/core";
+import { CONVERSATION_ID } from "@/engine/constants";
 
 export default function ChatPage() {
   const appId = process.env.NEXT_PUBLIC_TALKJS_APP_ID || "";
-  const conversationId = "new_conversation"; // match the game page's conversation id
+  const conversationId = CONVERSATION_ID; // keep in sync with the main game page
 
   const sessionRef = useRef<any | null>(null);
   const convRef = useRef<any | null>(null);
@@ -18,6 +19,148 @@ export default function ChatPage() {
   // Track seen message IDs to avoid duplicate renders when subscriptions
   // emit an initial batch and then realtime updates (or StrictMode double-run).
   const seenIdsRef = useRef<Set<string>>(new Set());
+
+  // Render TalkJS Message Content (text and media) into React nodes.
+  // Accepts either a plain string, a Slate-like node array, or any TalkJS
+  // MessageContent shape. Best-effort rendering with graceful fallbacks.
+  function renderMessageContent(content: any): React.ReactNode {
+    // 1) Plain string
+    if (content == null) return null;
+    if (typeof content === "string") return content;
+
+    // 2) Some SDKs put rich content under .content, .body or .text
+    // Try to unwrap common container shapes
+    if (Array.isArray(content) === false && typeof content === "object") {
+      const possible = (content as any).content ?? (content as any).body ?? (content as any).text;
+      if (possible && possible !== content) return renderMessageContent(possible);
+    }
+
+    // 3) Array of nodes (Slate-style / TalkJS Message Content)
+    if (Array.isArray(content)) {
+      return (
+        <>
+          {content.map((node, idx) => (
+            <React.Fragment key={idx}>{renderNode(node)}</React.Fragment>
+          ))}
+        </>
+      );
+    }
+
+    // 4) Leaf text node: { text: "..." }
+    if (typeof content === "object" && content && typeof (content as any).text === "string") {
+      return (content as any).text;
+    }
+
+    // 5) Unknown object; show safe string
+    try {
+      return String(content);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function renderNode(node: any): React.ReactNode {
+    if (node == null) return null;
+
+    // Simple text leaf
+    if (typeof node === "string") return node;
+    if (typeof node === "object" && typeof node.text === "string") return node.text;
+
+    const type = (node && node.type) || "text";
+    const children = (node && (node.children ?? node.content ?? [])) || [];
+
+    // Helper to render children recursively
+    const renderedChildren = Array.isArray(children)
+      ? children.map((ch: any, i: number) => <React.Fragment key={i}>{renderNode(ch)}</React.Fragment>)
+      : typeof children === "string"
+      ? children
+      : null;
+
+    switch (type) {
+      case "paragraph":
+        return <p style={{ margin: "6px 0" }}>{renderedChildren}</p>;
+      case "text":
+        return <span>{renderedChildren}</span>;
+      case "bold":
+        return <strong>{renderedChildren}</strong>;
+      case "italic":
+        return <em>{renderedChildren}</em>;
+      case "underline":
+        return <u>{renderedChildren}</u>;
+      case "link": {
+        const href = node.href || node.url || node.src || "#";
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener" style={{ color: "#ffd27f", textDecoration: "underline" }}>
+            {renderedChildren || href}
+          </a>
+        );
+      }
+      case "mention": {
+        // Common TalkJS mention node may include id/name/label
+        const label = node.label || node.name || node.username || "@user";
+        return <span style={{ background: "#fff3cd", color: "#664d03", padding: "0 4px", borderRadius: 4 }}>@{label}</span>;
+      }
+      case "emoji":
+        return <span>{node.value || renderedChildren}</span>;
+      case "image": {
+        const src = node.url || node.src;
+        const alt = node.alt || "image";
+        if (!src) return null;
+        return (
+          <div style={{ margin: "6px 0" }}>
+            <img src={src} alt={alt} style={{ maxWidth: 240, maxHeight: 240, borderRadius: 8, display: "block" }} />
+          </div>
+        );
+      }
+      case "media": {
+        // Some schemas use a generic media node with subtype
+        const kind = node.kind || node.mediaType || node.subtype;
+        const url = node.url || node.src;
+        if (kind === "image") {
+          return (
+            <div style={{ margin: "6px 0" }}>
+              <img src={url} alt={node.alt || "image"} style={{ maxWidth: 240, maxHeight: 240, borderRadius: 8, display: "block" }} />
+            </div>
+          );
+        }
+        if (kind === "video") {
+          return (
+            <div style={{ margin: "6px 0" }}>
+              <video src={url} controls style={{ maxWidth: 320, borderRadius: 8 }} />
+            </div>
+          );
+        }
+        // Fallback link for other media types (audio, etc.)
+        return url ? (
+          <div style={{ margin: "6px 0" }}>
+            <a href={url} target="_blank" rel="noreferrer noopener" style={{ color: "#ffd27f", textDecoration: "underline" }}>
+              {node.name || "Download media"}
+            </a>
+          </div>
+        ) : null;
+      }
+      case "file": {
+        const url = node.url || node.href || node.src;
+        const name = node.name || "Download file";
+        if (!url) return <span>{name}</span>;
+        return (
+          <div style={{ margin: "6px 0" }}>
+            <a href={url} target="_blank" rel="noreferrer noopener" style={{ color: "#ffd27f", textDecoration: "underline" }}>
+              {name}
+            </a>
+          </div>
+        );
+      }
+      default:
+        // Unknown node type; attempt to render children or stringify
+        if (renderedChildren) return <span>{renderedChildren}</span>;
+        try {
+          return <span>{String(node)}</span>;
+        } catch (e) {
+          return null;
+        }
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -256,7 +399,7 @@ export default function ChatPage() {
                     boxShadow: '0 2px 8px rgba(13, 110, 253, 0.25)'
                   }}
                 >
-                  {typeof m.text === 'object' ? JSON.stringify(m.text) : m.text}
+                  {renderMessageContent((m.raw && (m.raw.content ?? m.raw.body ?? m.raw.text)) ?? m.text)}
                 </div>
               </div>
             ))}

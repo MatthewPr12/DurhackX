@@ -79,3 +79,76 @@ html, body {
   transform-origin: center center;
   will-change: transform;
 }
+
+/* Disco overlay effects for the 🪩 power-up */
+@keyframes discoSlide {
+  from { background-position: 0 0; }
+  to { background-position: 200px 0; }
+}
+@keyframes discoHue {
+  0% { filter: hue-rotate(0deg) saturate(1.2); }
+  100% { filter: hue-rotate(360deg) saturate(1.2); }
+}
+@keyframes discoStrobe {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.45; }
+}
+.disco-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8; /* behind ball (10) but above background text (0) */
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 0, 120, 0.25) 0 20px,
+    rgba(0, 180, 255, 0.25) 20px 40px
+  );
+  mix-blend-mode: screen;
+  animation: discoSlide 1.2s linear infinite, discoHue 3s linear infinite, discoStrobe 0.9s ease-in-out infinite;
+  border-radius: 12px;
+}
+
+/* Extra disco layers for a more funky look */
+@keyframes discoRotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.disco-beams {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 7;
+  mix-blend-mode: screen;
+  opacity: 0.35;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 0, 0.10), transparent 15%,
+    rgba(0, 255, 255, 0.12), transparent 30%,
+    rgba(255, 0, 255, 0.10), transparent 45%,
+    rgba(0, 200, 255, 0.12), transparent 60%,
+    rgba(255, 120, 0, 0.10), transparent 75%,
+    rgba(160, 0, 255, 0.12), transparent 90%,
+    rgba(255, 255, 0, 0.10)
+  );
+  animation: discoRotate 8s linear infinite;
+}
+
+@keyframes discoPan {
+  from { background-position: 0 0; }
+  to { background-position: 200px 120px; }
+}
+.disco-dots {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0.22;
+  mix-blend-mode: screen;
+  background-image: repeating-radial-gradient(
+    circle at 20px 20px,
+    rgba(255, 255, 255, 0.08) 0 2px,
+    rgba(0, 0, 0, 0) 3px 24px
+  );
+  background-size: 48px 48px;
+  animation: discoPan 3s linear infinite, discoHue 5s linear infinite;
+}

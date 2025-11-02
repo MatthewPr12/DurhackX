@@ -6,11 +6,18 @@ import { getTalkSession } from "@talkjs/core";
 import durhackTheme, { Avatar } from "../engine/talkTheme";
 import createMultiplayer from "../engine/multiplayer";
 import { useEmojiSpawner } from "../engine/emoji-spawner";
+import { CONVERSATION_ID } from "../engine/constants";
 
 // Feature flag: toggle emoji spawner globally for this page
 const ENABLE_SPAWNER = true;
 // Default power-up cooldown duration (ms)
 const DEFAULT_COOLDOWN_TIME_MS = 5000;
+// Disco music asset served via Next API route (reads the file from repo root)
+const DISCO_AUDIO_SRC = "/api/audio/disco";
+const DISCO_FADE_MS = 600; // < 1s fade in/out
+const DISCO_TARGET_GAIN = 0.6; // perceived volume for music (0..1)
+// External quiz API base URL (for logging). Client calls are proxied via Next API to avoid CORS
+const QUIZ_API_BASE = process.env.NEXT_PUBLIC_QUIZ_API_BASE || "https://durhack1.enego.co.uk";
 
 export default function Home() {
   // Provide your TalkJS app ID via an env var: NEXT_PUBLIC_TALKJS_APP_ID
@@ -30,7 +37,7 @@ export default function Home() {
     const pid = qs.get("player");
     if (pid) setUserId(pid);
   }, []);
-  const conversationId = "quiz_room_2";
+  const conversationId = CONVERSATION_ID;
 
   
 
@@ -45,6 +52,8 @@ export default function Home() {
 
   const sessionRef = useRef<any | null>(null);
   const conversationRef = useRef<any | null>(null);
+  // Track current quiz question id from bot messages (e.g., "Q12: ...")
+  const currentQuestionIdRef = useRef<number | null>(null);
   // username chosen in start modal and session-start flag (used by TalkJS init)
   const [myUserName, setMyUserName] = useState<string>(() => process.env.NEXT_PUBLIC_USER_NAME || "");
   const [started, setStarted] = useState<boolean>(false);
@@ -111,7 +120,7 @@ export default function Home() {
         }
         conversation.participant(otherUserId).createIfNotExists();
         // keep a reference to the conversation so UI components can send messages
-        conversationRef.current = conversation;
+  conversationRef.current = conversation;
         try {
           // Log the conversation id used locally so we can verify both pages
           // are joining the same TalkJS conversation.
@@ -171,6 +180,14 @@ export default function Home() {
           const text = message && (message.text || message.body || message.content || message.message || message.displayText) || message;
           const sender = message && (message.sender && (message.sender.id || message.sender) || message.from && (message.from.id || message.from) || message.senderId) || 'unknown';
           console.log('[talk] message received', { text, from: sender, raw: message });
+          // Parse bot-posted question lines like "Q12: ..." to track current question id
+          if (typeof text === 'string') {
+            const m = text.match(/^Q(\d+):/);
+            if (m && m[1]) {
+              const qid = parseInt(m[1], 10);
+              if (Number.isFinite(qid)) currentQuestionIdRef.current = qid;
+            }
+          }
         });
       } else if (typeof conv.on === 'function') {
         const cb = (m: any) => {
@@ -184,6 +201,13 @@ export default function Home() {
           const text = m && (m.text || m.body || m.content || m.displayText) || m;
           const sender = m && (m.sender && (m.sender.id || m.sender) || m.from && (m.from.id || m.from) || m.senderId) || 'unknown';
           console.log('[talk] message received', { text, from: sender, raw: m });
+          if (typeof text === 'string') {
+            const m2 = text.match(/^Q(\d+):/);
+            if (m2 && m2[1]) {
+              const qid = parseInt(m2[1], 10);
+              if (Number.isFinite(qid)) currentQuestionIdRef.current = qid;
+            }
+          }
         };
         conv.on('message', cb);
         unsub = () => conv.off && conv.off('message', cb);
@@ -583,13 +607,38 @@ export default function Home() {
     }
     const text = buffer.trim();
     if (!text) return setBuffer("");
+    // Map single-letter or numeric answers to choice indices
+    const upper = text.toUpperCase();
+    const letterIdx = upper.length === 1 && upper >= 'A' && upper <= 'Z' ? upper.charCodeAt(0) - 'A'.charCodeAt(0) : null;
+    const numIdx = /^[0-9]+$/.test(text) ? parseInt(text, 10) : null;
+    const choiceIndex = (letterIdx !== null ? letterIdx : (numIdx !== null ? numIdx : null));
+
+    if (choiceIndex !== null && currentQuestionIdRef.current != null) {
+      // Send answer to external quiz API; it will post feedback + next question via TalkJS
+      try {
+        const resp = await fetch(`/api/quiz/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            question_id: currentQuestionIdRef.current,
+            choice_index: choiceIndex,
+            talk_conversation_id: CONVERSATION_ID,
+          }),
+        });
+        const body = await resp.text();
+        try { console.log('[quiz] /answer', resp.status, body ? JSON.parse(body) : null); } catch { console.log('[quiz] /answer', resp.status, body); }
+      } catch (e) {
+        console.error('[quiz] /answer failed', e);
+      }
+      setBuffer("");
+      return;
+    }
+
+    // Fallback: normal chat message
     try {
       await conv.send(text);
-      // Log that we sent a message (sender is current user)
-      // Use a short console tag so devs can easily grep messages.
       console.log('[talk] message sent', { text, from: userId });
     } catch (e) {
-      // eslint-disable-next-line no-console
       console.error("TalkJS send failed", e);
     }
     setBuffer("");
@@ -680,6 +729,20 @@ export default function Home() {
     };
   }, []);
 
+  // On start/join, also bootstrap the external quiz server so it posts the current/first question
+  useEffect(() => {
+    if (!started || !userId) return;
+    const name = myUserName || userId;
+    const photo = myPhoto || '';
+    fetch(`/api/quiz/bootstrap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, name, photo_url: photo }),
+    }).then(async (r) => {
+      try { console.log('[quiz] bootstrap (proxied)', r.status, await r.text()); } catch {}
+    }).catch((e) => console.warn('[quiz] bootstrap failed', e));
+  }, [started, userId, myUserName, myPhoto]);
+
   // cleanup on unmount: ensure any running RAF is cancelled
   useEffect(() => {
     return () => {
@@ -721,6 +784,12 @@ export default function Home() {
   const velRef = useRef({ x: 0, y: SPEED });
   // Speed multiplier for temporary effects (e.g., fire boost)
   const speedMultiplierRef = useRef<number>(1);
+  // Disco audio element (looped while disco power-up is active)
+  const discoAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Web Audio fallback if the MP3 fails to load or play
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  // Flags
+  const discoNeedsGestureRef = useRef<boolean>(false); // autoplay blocked
   const [activePowerups, setActivePowerups] = useState<Array<{ type: string; expiresAt: number }>>([]);
   const activePowerupsRef = useRef<Array<{ type: string; expiresAt: number }>>([]);
   useEffect(() => { activePowerupsRef.current = activePowerups; }, [activePowerups]);
@@ -736,6 +805,12 @@ export default function Home() {
     powerupTimersRef.current = {} as Record<string, number>;
     setActivePowerups([]);
     activePowerupsRef.current = [];
+    // Stop any ongoing disco audio
+    try {
+      const a = discoAudioRef.current;
+      if (a) { a.pause(); a.currentTime = 0; }
+    } catch {}
+    // No fallback tone to stop
     // Rescale velocity back to base immediately
     const vx = velRef.current.x;
     const vy = velRef.current.y;
@@ -772,9 +847,9 @@ export default function Home() {
   }
 
   // Generic, non-stacking power-up apply; refreshes duration if re-collected
-  function applyPowerup(type: string) {
+  function applyPowerup(type: string, durationMs?: number) {
     const now = Date.now();
-    const expiresAt = now + DEFAULT_COOLDOWN_TIME_MS;
+    const expiresAt = now + (durationMs ?? DEFAULT_COOLDOWN_TIME_MS);
     const prev = activePowerupsRef.current;
     const idx = prev.findIndex((p) => p.type === type);
     const next = [...prev];
@@ -792,10 +867,105 @@ export default function Home() {
       setActivePowerups(cur);
       delete powerupTimersRef.current[type];
       recomputeSpeedMultiplier();
-    }, DEFAULT_COOLDOWN_TIME_MS);
+    }, (durationMs ?? DEFAULT_COOLDOWN_TIME_MS));
     // apply immediately
     recomputeSpeedMultiplier();
   }
+
+  // Prepare the disco audio on mount (if file is present in public/audio)
+  useEffect(() => {
+    try {
+      const a = new Audio(DISCO_AUDIO_SRC);
+      a.loop = true;
+      a.preload = "auto";
+      // Start at target volume to ensure audibility on platforms where
+      // programmatic volume control is restricted (e.g., iOS Safari).
+      // We'll still attempt fades where supported, but never start fully muted.
+      a.volume = DISCO_TARGET_GAIN;
+      discoAudioRef.current = a;
+      a.addEventListener('error', (e) => { try { console.warn('[audio] disco element error', a.error); } catch {} });
+    } catch (e) {
+      discoAudioRef.current = null;
+    }
+    return () => {
+      try { const a = discoAudioRef.current; if (a) { a.pause(); a.src = ""; } } catch {}
+      discoAudioRef.current = null;
+    };
+  }, []);
+
+  // Side-effect: play/pause disco music while the 'disco' power-up is active
+  useEffect(() => {
+    const hasDisco = activePowerups.some((p) => p.type === 'disco');
+    const a = discoAudioRef.current;
+    // Fallback tone disabled (avoid buzzing)
+    function startFallbackTone() { /* no-op */ }
+    function stopFallbackTone() { /* no-op */ }
+    // Element-volume based fades (no WebAudio required)
+    function fadeInDiscoAudio(ms = DISCO_FADE_MS) {
+      const el = discoAudioRef.current; if (!el) return;
+      const start = el.volume;
+      const delta = Math.max(0, DISCO_TARGET_GAIN - start);
+      if (delta === 0) return;
+      const t0 = performance.now();
+      function step(t: number, audio: HTMLAudioElement) {
+        const p = Math.min(1, (t - t0) / ms);
+        audio.volume = start + delta * p;
+        if (p < 1) requestAnimationFrame((t2) => step(t2, audio));
+      }
+      requestAnimationFrame((t) => step(t, el));
+    }
+    function fadeOutDiscoAudio(ms = DISCO_FADE_MS) {
+      const el = discoAudioRef.current; if (!el) return;
+      const start = el.volume;
+      const delta = Math.max(0, start - 0);
+      if (delta === 0) return;
+      const t0 = performance.now();
+      function step(t: number, audio: HTMLAudioElement) {
+        const p = Math.min(1, (t - t0) / ms);
+        audio.volume = start - delta * p;
+        if (p < 1) requestAnimationFrame((t2) => step(t2, audio));
+      }
+      requestAnimationFrame((t) => step(t, el));
+    }
+
+    let cleanupGesture: (() => void) | null = null;
+
+    async function ensureAudioAndPlay() {
+      if (!a) return;
+      try {
+        await a.play();
+        discoNeedsGestureRef.current = false;
+        fadeInDiscoAudio();
+      } catch (err: any) {
+        // Autoplay blocked: wait for gesture, then play and fade in
+        discoNeedsGestureRef.current = true;
+        const onGesture = () => {
+          if (!activePowerups.some((p) => p.type === 'disco')) return;
+          a.play().then(() => { discoNeedsGestureRef.current = false; fadeInDiscoAudio(); }).catch(() => {});
+        };
+        window.addEventListener('pointerdown', onGesture, { once: true });
+        window.addEventListener('keydown', onGesture, { once: true });
+        cleanupGesture = () => {
+          window.removeEventListener('pointerdown', onGesture);
+          window.removeEventListener('keydown', onGesture);
+        };
+      }
+    }
+
+    if (hasDisco) {
+      ensureAudioAndPlay();
+    } else {
+      // Smoothly fade out then pause/reset
+      fadeOutDiscoAudio();
+      setTimeout(() => {
+        try { if (a) { a.pause(); a.currentTime = 0; a.volume = 0; } } catch {}
+      }, DISCO_FADE_MS + 60);
+    }
+
+    return () => {
+      if (cleanupGesture) cleanupGesture();
+    };
+  }, [activePowerups]);
 
   
   const physicsRaf = useRef<number | null>(null);
@@ -842,7 +1012,8 @@ export default function Home() {
         if (dx * dx + dy * dy <= rr * rr) {
           // Consume and apply corresponding effect
           try { consumeSpawn(s.id); } catch {}
-          if (s.emoji === '🔥') applyPowerup('fire');
+          if (s.emoji === '🔥') applyPowerup('fire', (s as any).cooldownMs);
+          if (s.emoji === '🪩') applyPowerup('disco', (s as any).cooldownMs);
         }
       }
       raf = requestAnimationFrame(step);
@@ -1436,6 +1607,15 @@ export default function Home() {
                   ←/→ to move • Enter to send
                 </div>
               </div>
+
+              {/* Disco visual overlays */}
+              {activePowerups.some((p) => p.type === 'disco') && (
+                <>
+                  <div aria-hidden className="disco-dots" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                  <div aria-hidden className="disco-beams" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                  <div aria-hidden className="disco-overlay" style={{ width: DESIGN_W, height: DESIGN_H }} />
+                </>
+              )}
 
               {/* (moved) debug overlay now renders outside play area */}
 

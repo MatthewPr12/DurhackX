@@ -4,7 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 load_dotenv()
 print("APP_ID =", repr(os.getenv("TALKJS_APP_ID")))
-print("SECRET startswith sk_test? =", os.getenv("TALKJS_SECRET","").startswith("sk_test_"))
+print("SECRET startswith sk_test? =", os.getenv("TALKJS_SECRET","" ).startswith("sk_test_"))
+print("API_ORIGIN =", repr(os.getenv("TALKJS_API_ORIGIN", "https://api.talkjs.com")))
 
 from contextlib import asynccontextmanager
 from models import (
@@ -19,6 +20,7 @@ from talkjs_client import (
 
 TALKJS_APP_ID = os.getenv("TALKJS_APP_ID", "")
 DEFAULT_CONVO = os.getenv("TALKJS_CONVERSATION_ID", "quiz_room_2")
+print("CONVERSATION_ID =", DEFAULT_CONVO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,6 +35,29 @@ async def lifespan(app: FastAPI):
             system_bot_id="system-bot",
             subject="IQ Brick Arena",
         )
+        # Post a startup notice into the same TalkJS conversation so we can
+        # verify the server is alive and talking to TalkJS on boot.
+        try:
+            post_text(DEFAULT_CONVO, "🔔 Quiz server restarted", sender_id="system-bot")
+        except Exception:
+            pass
+
+        # If there is no active question yet for this room, post the first one
+        try:
+            st = get_room_state(DEFAULT_CONVO)
+            if st.current_question_id is None:
+                q = get_next_question(None)
+                if q:
+                    set_room_current_question(DEFAULT_CONVO, q.id)
+                    post_text(
+                        DEFAULT_CONVO,
+                        f"Q{q.id}: {q.text}\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(q.answers)),
+                        sender_id="system-bot",
+                    )
+                else:
+                    post_text(DEFAULT_CONVO, "No questions available.", sender_id=None)
+        except Exception:
+            pass
     except Exception:
         pass
     yield

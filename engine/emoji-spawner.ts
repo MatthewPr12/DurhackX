@@ -3,10 +3,13 @@ import { useEffect, useRef, useState } from "react";
 // Centralized emoji-spawner configuration (supports multiple variants)
 export const DEFAULT_LIFETIME_MS = 5000;
 export const DEFAULT_SIZE = 30; // px in design-space
-const EMOJI_VARIANTS: Array<{ emoji: string; size: number; lifetimeMs: number }> = [
-  { emoji: "🔥", size: DEFAULT_SIZE, lifetimeMs: DEFAULT_LIFETIME_MS },
+// Per-emoji config: spawn lifetime and collected-effect cooldown
+const EMOJI_VARIANTS: Array<{ emoji: string; size: number; lifetimeMs: number; cooldownMs: number }> = [
+  { emoji: "🔥", size: DEFAULT_SIZE,     lifetimeMs: DEFAULT_LIFETIME_MS, cooldownMs: 5000 },
+  // Disco ball power-up: slightly larger to feel special; lasts 20s when collected
+  { emoji: "🪩", size: DEFAULT_SIZE + 6, lifetimeMs: DEFAULT_LIFETIME_MS, cooldownMs: 20000 },
 ];
-const DEFAULT_RATE_PER_SEC = 0.1; // lambda for Poisson process
+const DEFAULT_RATE_PER_SEC = 0.5; // lambda for Poisson process
 const DEFAULT_EXCLUDE_BUFFER = 30; // extra width added to ball diameter for no-spawn lane
 
 export type Spawn = {
@@ -16,6 +19,7 @@ export type Spawn = {
   size: number;
   emoji: string;
   expiresAt: number;
+  cooldownMs: number; // how long the collected power-up effect lasts
 };
 
 export function useEmojiSpawner(opts: {
@@ -108,7 +112,7 @@ export function useEmojiSpawner(opts: {
 
     const id = Date.now() + Math.floor(Math.random() * 100000);
     const expiresAt = Date.now() + variant.lifetimeMs;
-    const spawn: Spawn = { id, x: sx, y: sy, size: spawnSize, emoji: variant.emoji, expiresAt };
+  const spawn: Spawn = { id, x: sx, y: sy, size: spawnSize, emoji: variant.emoji, expiresAt, cooldownMs: variant.cooldownMs };
     setSpawns((prev) => [...prev, spawn]);
     spawnTimersRef.current[id] = window.setTimeout(() => {
       setSpawns((prev) => prev.filter((s) => s.id !== id));
