@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Dino TalkJS Message</title>
+  <script src="https://cdn.jsdelivr.net/npm/talkjs@latest/talk.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 50px auto;
+      padding: 20px;
+    }
+    button {
+      background-color: #4CAF50;
+      color: white;
+      padding: 15px 32px;
+      text-align: center;
+      font-size: 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 10px 0;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    #status {
+      margin-top: 20px;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    .success {
+      background-color: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    .error {
+      background-color: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    .info {
+      background-color: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+  </style>
+</head>
+<body>
+  <h1>🦕 Test Dino TalkJS Message</h1>
+  <p>This test script will send the dino.avif image via TalkJS, simulating what happens when you collect the dino emoji in the game.</p>
+  
+  <button id="testBtn" onclick="testDinoMessage()">Send Dino Image via TalkJS</button>
+  
+  <div id="status"></div>
+
+  <script>
+    // Get config from environment (same as your main app)
+    const TALKJS_APP_ID = 'ty6ueHHy';
+    const TALKJS_HOST = 'durhack.talkjs.com';
+    const CONVERSATION_ID = 'new_conversation';
+    const USER_ID = 'test_player_' + Math.random().toString(36).substring(7);
+    const OTHER_USER_ID = 'nina';
+
+    let session = null;
+    let conversation = null;
+
+    function setStatus(message, type = 'info') {
+      const statusDiv = document.getElementById('status');
+      statusDiv.innerHTML = message;
+      statusDiv.className = type;
+    }
+
+    async function initTalkJS() {
+      try {
+        setStatus('Initializing TalkJS...', 'info');
+        
+        await Talk.ready;
+        
+        // Create session with custom host
+        const me = new Talk.User({
+          id: USER_ID,
+          name: 'Test Player',
+          photoUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + USER_ID
+        });
+        
+        session = new Talk.Session({
+          appId: TALKJS_APP_ID,
+          me: me,
+          host: TALKJS_HOST
+        });
+
+        // Create conversation
+        const other = new Talk.User({
+          id: OTHER_USER_ID,
+          name: 'Nina'
+        });
+
+        conversation = session.getOrCreateConversation(CONVERSATION_ID);
+        conversation.setParticipant(me);
+        conversation.setParticipant(other);
+
+        setStatus('✅ TalkJS initialized successfully!', 'success');
+        return true;
+      } catch (error) {
+        setStatus('❌ Failed to initialize TalkJS: ' + error.message, 'error');
+        console.error('TalkJS init error:', error);
+        return false;
+      }
+    }
+
+    async function testDinoMessage() {
+      const btn = document.getElementById('testBtn');
+      btn.disabled = true;
+      
+      try {
+        // Initialize TalkJS if not already done
+        if (!session || !conversation) {
+          const initialized = await initTalkJS();
+          if (!initialized) {
+            btn.disabled = false;
+            return;
+          }
+        }
+
+        setStatus('🦕 Fetching dino.avif...', 'info');
+
+        // Fetch the dino.avif file
+        const response = await fetch('/dino.avif');
+        if (!response.ok) {
+          throw new Error('Failed to fetch dino.avif: ' + response.statusText);
+        }
+        
+        const blob = await response.blob();
+        const file = new File([blob], 'dino.avif', { type: 'image/avif' });
+        
+        setStatus('📤 Uploading image to TalkJS...', 'info');
+        
+        // Upload the image to TalkJS and get a file token
+        const fileToken = await session.uploadImage(file, { filename: 'dino.avif' });
+        
+        setStatus('💬 Sending message...', 'info');
+        
+        // Send the message with the image
+        await conversation.send({
+          content: [{
+            type: 'file',
+            fileToken: fileToken
+          }]
+        });
+        
+        setStatus('✅ SUCCESS! Dino image sent via TalkJS! Check your chat interface.', 'success');
+        
+      } catch (error) {
+        setStatus('❌ Error: ' + error.message, 'error');
+        console.error('Test failed:', error);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Auto-initialize on page load
+    window.addEventListener('load', () => {
+      setStatus('Ready to test. Click the button above.', 'info');
+    });
+  </script>
+</body>
+</html>

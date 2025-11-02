@@ -224,43 +224,6 @@ export default function Home() {
     };
   }, [joinConfirmed, userId]);
 
-  // TEMPORARY: Test dino powerup message on startup
-  useEffect(() => {
-    if (!joinConfirmed) return;
-    const session = sessionRef.current;
-    const conversation = conversationRef.current;
-    if (!session || !conversation) return;
-
-    // Wait a bit for everything to be ready, then send test message
-    const testTimeout = setTimeout(async () => {
-      try {
-        console.log('🦕 [TEST] Sending dino image via TalkJS...');
-        
-        // Fetch the dino.png file from the public path
-        const response = await fetch('/dino.png');
-        const blob = await response.blob();
-        const file = new File([blob], 'dino.png', { type: 'image/png' });
-        
-        // Upload the image to TalkJS and get a file token
-        const fileToken = await session.uploadImage(file, { filename: 'dino.png' });
-        
-        // Send the message with the image
-        await conversation.send({
-          content: [{
-            type: 'file',
-            fileToken: fileToken
-          }]
-        });
-        
-        console.log('✅ [TEST] Dino image sent successfully!');
-      } catch (err) {
-        console.error('❌ [TEST] Failed to send dino image:', err);
-      }
-    }, 2000); // Wait 2 seconds after TalkJS is ready
-
-    return () => clearTimeout(testTimeout);
-  }, [joinConfirmed]);
-
   // Best-effort: when the tab/window closes, remove this player from the
   // conversation participants on the server to keep the roster clean.
   useEffect(() => {
@@ -1051,34 +1014,7 @@ export default function Home() {
           try { consumeSpawn(s.id); } catch {}
           if (s.emoji === '🔥') applyPowerup('fire', (s as any).cooldownMs);
           if (s.emoji === '🪩') applyPowerup('disco', (s as any).cooldownMs);
-          if (s.emoji === '🦕') {
-            // Dino emoji: ONLY send image via TalkJS (no visual powerup)
-            (async () => {
-              try {
-                const session = sessionRef.current;
-                const conversation = conversationRef.current;
-                if (!session || !conversation) return;
-                
-                // Fetch the dino.png file from the public path
-                const response = await fetch('/dino.png');
-                const blob = await response.blob();
-                const file = new File([blob], 'dino.png', { type: 'image/png' });
-                
-                // Upload the image to TalkJS and get a file token
-                const fileToken = await session.uploadImage(file, { filename: 'dino.png' });
-                
-                // Send the message with the image
-                await conversation.send({
-                  content: [{
-                    type: 'file',
-                    fileToken: fileToken
-                  }]
-                });
-              } catch (err) {
-                console.error('Failed to send dino image via TalkJS:', err);
-              }
-            })();
-          }
+          if (s.emoji === '�') applyPowerup('dino', (s as any).cooldownMs);
         }
       }
       raf = requestAnimationFrame(step);

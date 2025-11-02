@@ -8,6 +8,8 @@ const EMOJI_VARIANTS: Array<{ emoji: string; size: number; lifetimeMs: number; c
   { emoji: "🔥", size: DEFAULT_SIZE,     lifetimeMs: DEFAULT_LIFETIME_MS, cooldownMs: 5000 },
   // Disco ball power-up: slightly larger to feel special; lasts 20s when collected
   { emoji: "🪩", size: DEFAULT_SIZE + 6, lifetimeMs: DEFAULT_LIFETIME_MS, cooldownMs: 20000 },
+  // Dinosaur: triggers a drifting dino overlay for the duration of its cooldown
+  { emoji: "🦕", size: DEFAULT_SIZE + 4, lifetimeMs: DEFAULT_LIFETIME_MS, cooldownMs: 8000 },
 ];
 const DEFAULT_RATE_PER_SEC = 0.5; // lambda for Poisson process
 const DEFAULT_EXCLUDE_BUFFER = 30; // extra width added to ball diameter for no-spawn lane

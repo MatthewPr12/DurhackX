@@ -152,3 +152,45 @@ html, body {
   background-size: 48px 48px;
   animation: discoPan 3s linear infinite, discoHue 5s linear infinite;
 }
+
+/* Dino overlay: drift an AVIF dinosaur image across the screen while active */
+@keyframes dino-drift {
+  from { transform: translateX(-20%); }
+  to { transform: translateX(120%); }
+}
+.dino-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6; /* behind ball (10) and above spawns (5) */
+}
+.dino-overlay img {
+  position: absolute;
+  left: 0;
+  top: 55%;
+  transform: translateX(-20%);
+  width: 420px;
+  height: auto;
+  opacity: 0.3;
+  filter: drop-shadow(0 6px 18px rgba(0,0,0,0.35));
+  animation-name: dino-drift;
+  animation-duration: var(--dino-duration, 6000ms);
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+/* Fallback if AVIF can't load: animate a big emoji instead */
+.dino-fallback {
+  position: absolute;
+  left: 0;
+  top: 55%;
+  transform: translateX(-20%);
+  font-size: 280px;
+  line-height: 1;
+  opacity: 0.28;
+  filter: drop-shadow(0 6px 18px rgba(0,0,0,0.35));
+  animation-name: dino-drift;
+  animation-duration: var(--dino-duration, 6000ms);
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
