@@ -730,12 +730,8 @@ export default function Home() {
   const discoAudioRef = useRef<HTMLAudioElement | null>(null);
   // Web Audio fallback if the MP3 fails to load or play
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const discoNodeRef = useRef<{ osc: OscillatorNode; gain: GainNode } | null>(null);
   // Flags
-  const discoAudioUnavailableRef = useRef<boolean>(false); // 404 or media error
   const discoNeedsGestureRef = useRef<boolean>(false); // autoplay blocked
-  const discoGainRef = useRef<GainNode | null>(null);
-  const discoMediaNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const [activePowerups, setActivePowerups] = useState<Array<{ type: string; expiresAt: number }>>([]);
   const activePowerupsRef = useRef<Array<{ type: string; expiresAt: number }>>([]);
   useEffect(() => { activePowerupsRef.current = activePowerups; }, [activePowerups]);
@@ -756,15 +752,7 @@ export default function Home() {
       const a = discoAudioRef.current;
       if (a) { a.pause(); a.currentTime = 0; }
     } catch {}
-    // Stop Web Audio fallback
-    try {
-      const n = discoNodeRef.current;
-      if (n) {
-        n.gain.gain.exponentialRampToValueAtTime(0.0001, (audioCtxRef.current || new (window as any).AudioContext()).currentTime + 0.05);
-        n.osc.stop((audioCtxRef.current || new (window as any).AudioContext()).currentTime + 0.06);
-      }
-    } catch {}
-    discoNodeRef.current = null;
+    // No fallback tone to stop
     // Rescale velocity back to base immediately
     const vx = velRef.current.x;
     const vy = velRef.current.y;
@@ -832,40 +820,18 @@ export default function Home() {
       const a = new Audio(DISCO_AUDIO_SRC);
       a.loop = true;
       a.preload = "auto";
-      // We'll control volume via WebAudio gain; keep element volume at 1
-      a.volume = 1;
+      // Start at target volume to ensure audibility on platforms where
+      // programmatic volume control is restricted (e.g., iOS Safari).
+      // We'll still attempt fades where supported, but never start fully muted.
+      a.volume = DISCO_TARGET_GAIN;
       discoAudioRef.current = a;
-      a.addEventListener('error', () => { discoAudioUnavailableRef.current = true; });
+      a.addEventListener('error', (e) => { try { console.warn('[audio] disco element error', a.error); } catch {} });
     } catch (e) {
       discoAudioRef.current = null;
-      discoAudioUnavailableRef.current = true;
-    }
-    // Prepare WebAudio graph for smooth fades
-    try {
-      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const ctx = audioCtxRef.current;
-      if (discoAudioRef.current && ctx && !discoMediaNodeRef.current) {
-        const src = ctx.createMediaElementSource(discoAudioRef.current);
-        const gain = ctx.createGain();
-        gain.gain.value = 0.0001; // start muted (avoid pop)
-        src.connect(gain).connect(ctx.destination);
-        discoMediaNodeRef.current = src;
-        discoGainRef.current = gain;
-      }
-    } catch (e) {
-      // ignore WebAudio init failures; we'll rely on element volume
-      discoGainRef.current = null;
-      discoMediaNodeRef.current = null;
     }
     return () => {
       try { const a = discoAudioRef.current; if (a) { a.pause(); a.src = ""; } } catch {}
       discoAudioRef.current = null;
-      try {
-        if (discoMediaNodeRef.current) discoMediaNodeRef.current.disconnect();
-        if (discoGainRef.current) discoGainRef.current.disconnect();
-      } catch {}
-      discoMediaNodeRef.current = null;
-      discoGainRef.current = null;
     };
   }, []);
 
@@ -873,103 +839,58 @@ export default function Home() {
   useEffect(() => {
     const hasDisco = activePowerups.some((p) => p.type === 'disco');
     const a = discoAudioRef.current;
-    // Helper: start fallback tone using Web Audio
-    function startFallbackTone() {
-      try {
-        if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const ctx = audioCtxRef.current;
-        if (discoNodeRef.current) return; // already playing
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.value = 110; // low funky tone
-        gain.gain.value = 0.08; // subtle
-        osc.connect(gain).connect(ctx.destination);
-        osc.start();
-        discoNodeRef.current = { osc, gain };
-      } catch {}
-    }
-    function stopFallbackTone() {
-      try {
-        const n = discoNodeRef.current;
-        if (n && audioCtxRef.current) {
-          n.gain.gain.exponentialRampToValueAtTime(0.0001, audioCtxRef.current.currentTime + 0.05);
-          n.osc.stop(audioCtxRef.current.currentTime + 0.06);
-        }
-      } catch {}
-      discoNodeRef.current = null;
-    }
+    // Fallback tone disabled (avoid buzzing)
+    function startFallbackTone() { /* no-op */ }
+    function stopFallbackTone() { /* no-op */ }
+    // Element-volume based fades (no WebAudio required)
     function fadeInDiscoAudio(ms = DISCO_FADE_MS) {
-      try {
-        const ctx = audioCtxRef.current;
-        const g = discoGainRef.current;
-        if (!ctx || !g) return;
-        const now = ctx.currentTime;
-        g.gain.cancelScheduledValues(now);
-        const start = Math.max(0.0001, g.gain.value);
-        g.gain.setValueAtTime(start, now);
-        g.gain.linearRampToValueAtTime(DISCO_TARGET_GAIN, now + ms / 1000);
-      } catch {}
+      const el = discoAudioRef.current; if (!el) return;
+      const start = el.volume;
+      const delta = Math.max(0, DISCO_TARGET_GAIN - start);
+      if (delta === 0) return;
+      const t0 = performance.now();
+      function step(t: number, audio: HTMLAudioElement) {
+        const p = Math.min(1, (t - t0) / ms);
+        audio.volume = start + delta * p;
+        if (p < 1) requestAnimationFrame((t2) => step(t2, audio));
+      }
+      requestAnimationFrame((t) => step(t, el));
     }
     function fadeOutDiscoAudio(ms = DISCO_FADE_MS) {
-      try {
-        const ctx = audioCtxRef.current;
-        const g = discoGainRef.current;
-        if (!ctx || !g) return;
-        const now = ctx.currentTime;
-        g.gain.cancelScheduledValues(now);
-        const start = Math.max(0.0001, g.gain.value);
-        g.gain.setValueAtTime(start, now);
-        g.gain.linearRampToValueAtTime(0.0001, now + ms / 1000);
-      } catch {}
+      const el = discoAudioRef.current; if (!el) return;
+      const start = el.volume;
+      const delta = Math.max(0, start - 0);
+      if (delta === 0) return;
+      const t0 = performance.now();
+      function step(t: number, audio: HTMLAudioElement) {
+        const p = Math.min(1, (t - t0) / ms);
+        audio.volume = start - delta * p;
+        if (p < 1) requestAnimationFrame((t2) => step(t2, audio));
+      }
+      requestAnimationFrame((t) => step(t, el));
     }
 
     let cleanupGesture: (() => void) | null = null;
 
     async function ensureAudioAndPlay() {
-      // Preflight HEAD to detect missing file; skip if we already know it's unavailable
-      if (!discoAudioUnavailableRef.current) {
-        try {
-          const head = await fetch(DISCO_AUDIO_SRC, { method: 'HEAD' });
-          if (!head.ok) discoAudioUnavailableRef.current = true;
-        } catch {
-          // Network error: treat as unavailable for now
-          discoAudioUnavailableRef.current = true;
-        }
-      }
-      if (discoAudioUnavailableRef.current) {
-        startFallbackTone();
-        return;
-      }
       if (!a) return;
       try {
-        // Ensure context is resumed so fades are audible
-        try { if (audioCtxRef.current && audioCtxRef.current.state !== 'running') await audioCtxRef.current.resume(); } catch {}
         await a.play();
-        // success, clear flags
         discoNeedsGestureRef.current = false;
         fadeInDiscoAudio();
       } catch (err: any) {
-        // If autoplay blocked, set gesture flag and wait for user input
-        if (err && (err.name === 'NotAllowedError' || err.code === 0)) {
-          discoNeedsGestureRef.current = true;
-          const onGesture = () => {
-            if (!activePowerups.some((p) => p.type === 'disco')) return;
-            // resume context as well
-            const resume = async () => { try { if (audioCtxRef.current && audioCtxRef.current.state !== 'running') await audioCtxRef.current.resume(); } catch {} };
-            resume().then(() => a.play().then(() => { discoNeedsGestureRef.current = false; fadeInDiscoAudio(); }).catch(() => {}));
-          };
-          window.addEventListener('pointerdown', onGesture, { once: true });
-          window.addEventListener('keydown', onGesture, { once: true });
-          cleanupGesture = () => {
-            window.removeEventListener('pointerdown', onGesture);
-            window.removeEventListener('keydown', onGesture);
-          };
-        } else {
-          // Other failure: fall back to tone
-          discoAudioUnavailableRef.current = true;
-          startFallbackTone();
-        }
+        // Autoplay blocked: wait for gesture, then play and fade in
+        discoNeedsGestureRef.current = true;
+        const onGesture = () => {
+          if (!activePowerups.some((p) => p.type === 'disco')) return;
+          a.play().then(() => { discoNeedsGestureRef.current = false; fadeInDiscoAudio(); }).catch(() => {});
+        };
+        window.addEventListener('pointerdown', onGesture, { once: true });
+        window.addEventListener('keydown', onGesture, { once: true });
+        cleanupGesture = () => {
+          window.removeEventListener('pointerdown', onGesture);
+          window.removeEventListener('keydown', onGesture);
+        };
       }
     }
 
@@ -979,9 +900,8 @@ export default function Home() {
       // Smoothly fade out then pause/reset
       fadeOutDiscoAudio();
       setTimeout(() => {
-        try { if (a) { a.pause(); a.currentTime = 0; } } catch {}
+        try { if (a) { a.pause(); a.currentTime = 0; a.volume = 0; } } catch {}
       }, DISCO_FADE_MS + 60);
-      stopFallbackTone();
     }
 
     return () => {
