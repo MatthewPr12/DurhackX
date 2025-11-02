@@ -2,10 +2,11 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { getTalkSession } from "@talkjs/core";
+import { CONVERSATION_ID } from "@/engine/constants";
 
 export default function ChatPage() {
   const appId = process.env.NEXT_PUBLIC_TALKJS_APP_ID || "";
-  const conversationId = "new_conversation"; // match the game page's conversation id
+  const conversationId = CONVERSATION_ID; // keep in sync with the main game page
 
   const sessionRef = useRef<any | null>(null);
   const convRef = useRef<any | null>(null);

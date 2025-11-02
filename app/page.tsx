@@ -6,6 +6,7 @@ import { getTalkSession } from "@talkjs/core";
 import durhackTheme, { Avatar } from "../engine/talkTheme";
 import createMultiplayer from "../engine/multiplayer";
 import { useEmojiSpawner } from "../engine/emoji-spawner";
+import { CONVERSATION_ID } from "../engine/constants";
 
 // Feature flag: toggle emoji spawner globally for this page
 const ENABLE_SPAWNER = true;
@@ -30,7 +31,7 @@ export default function Home() {
     const pid = qs.get("player");
     if (pid) setUserId(pid);
   }, []);
-  const conversationId = "quiz_room_2";
+  const conversationId = CONVERSATION_ID;
 
   
 
